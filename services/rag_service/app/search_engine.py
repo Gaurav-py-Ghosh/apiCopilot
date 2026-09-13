@@ -60,34 +60,41 @@ class SearchEngine:
             
             self.bm25, self.docs_texts, self.docs_metas = self.load_bm25()
             
-            # Check if database needs seeding from Ingestion Service
-            if self.collection and self.collection.count() == 0:
-                print("RAG Service: ChromaDB is empty. Syncing with Ingestion Service...")
-                self.sync_with_ingestion_service()
+            # Check if database needs seeding or updating from Ingestion Service
+            current_count = self.collection.count() if self.collection else 0
+            if self.collection and current_count < 80:
+                print(f"RAG Service: ChromaDB has only {current_count} chunks (< 80). Syncing complete dataset from Ingestion Service...")
+                self.sync_with_ingestion_service(clear_existing=True)
             else:
-                count = self.collection.count() if self.collection else 0
-                print(f"RAG Service: ChromaDB initialized with {count} chunks.")
+                print(f"RAG Service: ChromaDB initialized with {current_count} chunks.")
                 
             self.ready = True
             print("RAG Service: Ready.")
         except Exception as e:
             print(f"RAG Service Initialization Failed: {e}")
 
-    def sync_with_ingestion_service(self):
+    def sync_with_ingestion_service(self, clear_existing: bool = True) -> int:
         """Calls Ingestion Service to retrieve all parsed dataset chunks and embeds them."""
         try:
-            with httpx.Client(timeout=30.0) as client:
+            with httpx.Client(timeout=60.0) as client:
                 resp = client.post(f"{INGESTION_SERVICE_URL}/api/parse-dataset")
                 if resp.status_code == 200:
                     data = resp.json()
                     chunks = data.get("chunks", [])
                     if chunks:
+                        if clear_existing and self.collection:
+                            existing = self.collection.get()
+                            if existing and existing.get("ids"):
+                                self.collection.delete(ids=existing["ids"])
+                                print(f"RAG Service: Cleared {len(existing['ids'])} existing chunks before sync.")
                         self.ingest_chunks(chunks)
                         print(f"RAG Service: Successfully synced {len(chunks)} chunks from Ingestion Service.")
+                        return len(chunks)
                 else:
                     print(f"Ingestion service responded with status {resp.status_code}")
         except Exception as e:
             print(f"Could not connect to Ingestion Service at {INGESTION_SERVICE_URL}: {e}")
+        return 0
 
     def ingest_chunks(self, chunks: List[Dict[str, Any]]) -> int:
         """Ingests structured chunks into ChromaDB with dense embeddings and rebuilds BM25 index."""
@@ -99,7 +106,13 @@ class SearchEngine:
             "source": c.get("source", "unknown"),
             "api_title": c.get("api_title", "API"),
             "endpoint": c.get("endpoint", ""),
-            "hash": c.get("hash", "")
+            "hash": c.get("hash", ""),
+            "chunk_type": c.get("chunk_type", "api_spec"),
+            "symbol_name": c.get("symbol_name", ""),
+            "symbol_kind": c.get("symbol_kind", ""),
+            "file_path": c.get("file_path", c.get("source", "")),
+            "line_range": c.get("line_range", ""),
+            "language": c.get("language", "")
         } for c in chunks]
         ids = [str(uuid.uuid4()) for _ in chunks]
 
@@ -142,7 +155,11 @@ class SearchEngine:
                             "text": self.docs_texts[idx],
                             "source": meta.get("source", "unknown"),
                             "endpoint": meta.get("endpoint", ""),
-                            "api_title": meta.get("api_title", "")
+                            "api_title": meta.get("api_title", ""),
+                            "chunk_type": meta.get("chunk_type", "api_spec"),
+                            "symbol_name": meta.get("symbol_name", ""),
+                            "file_path": meta.get("file_path", meta.get("source", "")),
+                            "line_range": meta.get("line_range", "")
                         })
                 for idx in top_indices:
                     if scores[idx] > 0.0:
@@ -171,7 +188,11 @@ class SearchEngine:
                         "text": docs[i],
                         "source": meta.get("source", "unknown"),
                         "endpoint": meta.get("endpoint", ""),
-                        "api_title": meta.get("api_title", "")
+                        "api_title": meta.get("api_title", ""),
+                        "chunk_type": meta.get("chunk_type", "api_spec"),
+                        "symbol_name": meta.get("symbol_name", ""),
+                        "file_path": meta.get("file_path", meta.get("source", "")),
+                        "line_range": meta.get("line_range", "")
                     })
                 dense_candidates = docs
         
@@ -202,7 +223,11 @@ class SearchEngine:
                     "text": doc,
                     "source": meta.get("source", "unknown"),
                     "endpoint": meta.get("endpoint", ""),
-                    "api_title": meta.get("api_title", "")
+                    "api_title": meta.get("api_title", ""),
+                    "chunk_type": meta.get("chunk_type", "api_spec"),
+                    "symbol_name": meta.get("symbol_name", ""),
+                    "file_path": meta.get("file_path", meta.get("source", "")),
+                    "line_range": meta.get("line_range", "")
                 })
         else:
             cross_results.append({"rank": 1, "score": "N/A", "text": "Cross-Encoder model loading or candidate pool empty.", "source": "", "endpoint": "", "api_title": ""})

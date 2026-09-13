@@ -337,15 +337,15 @@ export function ExecutiveOverview({ onNavigateTab, onOpenJson }: ExecutiveOvervi
               <div className="mt-3 space-y-1 text-xs">
                 <div className="flex justify-between text-[#10b981] font-bold">
                   <span>gemma3:4b</span>
-                  <span>47.1% 🏆</span>
+                  <span>80.0% 🏆</span>
                 </div>
                 <div className="flex justify-between text-[#64748b]">
                   <span>codellama:7b</span>
-                  <span>28.6%</span>
+                  <span>50.0%</span>
                 </div>
                 <div className="flex justify-between text-[#64748b]">
                   <span>starcoder2:3b</span>
-                  <span>14.3%</span>
+                  <span>42.9%</span>
                 </div>
               </div>
             </div>
@@ -361,21 +361,21 @@ export function ExecutiveOverview({ onNavigateTab, onOpenJson }: ExecutiveOvervi
               <div className="text-xs text-[#94a3b8] font-sans mt-1">Cross-referencing disjoint specifications</div>
               <div className="mt-3 space-y-1 text-xs">
                 <div className="flex justify-between text-[#10b981] font-bold">
-                  <span>gemma3:4b</span>
-                  <span>46.4% 🏆</span>
+                  <span>codellama:7b</span>
+                  <span>66.7% 🏆</span>
                 </div>
                 <div className="flex justify-between text-[#38bdf8] font-semibold">
-                  <span>codellama:7b</span>
-                  <span>44.8%</span>
+                  <span>gemma3:4b</span>
+                  <span>54.3%</span>
                 </div>
                 <div className="flex justify-between text-[#64748b]">
                   <span>starcoder2:3b</span>
-                  <span>14.3%</span>
+                  <span>31.4%</span>
                 </div>
               </div>
             </div>
             <p className="text-[10.5px] font-sans text-[#8b949e] border-t border-[#162035] pt-2 mt-2 leading-relaxed">
-              <strong>Why Tied:</strong> Both Gemma and CodeLlama successfully cross-correlated separate auth guides with endpoint specs.
+              <strong>Why CodeLlama Won:</strong> Exceptional at correlating architectural guides with underlying API specs (e.g. bridging Stripe refunds to Order management).
             </p>
           </div>
 
@@ -386,21 +386,21 @@ export function ExecutiveOverview({ onNavigateTab, onOpenJson }: ExecutiveOvervi
               <div className="text-xs text-[#94a3b8] font-sans mt-1">3+ file sequential dependency traces</div>
               <div className="mt-3 space-y-1 text-xs">
                 <div className="flex justify-between text-[#10b981] font-bold">
-                  <span>codellama:7b</span>
-                  <span>50.0% 🏆</span>
+                  <span>gemma3:4b</span>
+                  <span>70.0% 🏆</span>
                 </div>
                 <div className="flex justify-between text-[#64748b]">
-                  <span>gemma3:4b</span>
-                  <span>30.0%</span>
+                  <span>codellama:7b</span>
+                  <span>50.0%</span>
                 </div>
                 <div className="flex justify-between text-[#64748b]">
                   <span>starcoder2:3b</span>
-                  <span>0.0%</span>
+                  <span>38.0%</span>
                 </div>
               </div>
             </div>
             <p className="text-[10.5px] font-sans text-[#8b949e] border-t border-[#162035] pt-2 mt-2 leading-relaxed">
-              <strong>Why CodeLlama Won:</strong> Larger 6.7B context memory preserved sequential order (e.g. GitHub push → CI/CD → Slack alert).
+              <strong>Why Gemma Won:</strong> Accurately synthesized 3- to 5-hop causal pipelines (GitHub push → CI/CD → Alerting → Slack bot).
             </p>
           </div>
 
@@ -412,15 +412,15 @@ export function ExecutiveOverview({ onNavigateTab, onOpenJson }: ExecutiveOvervi
               <div className="mt-3 space-y-1 text-xs">
                 <div className="flex justify-between text-[#10b981] font-bold">
                   <span>gemma3:4b</span>
-                  <span>61.3% 🏆</span>
+                  <span>77.5% 🏆</span>
                 </div>
                 <div className="flex justify-between text-[#64748b]">
                   <span>codellama:7b</span>
-                  <span>37.5%</span>
+                  <span>18.8%</span>
                 </div>
                 <div className="flex justify-between text-[#64748b]">
                   <span>starcoder2:3b</span>
-                  <span>0.0%</span>
+                  <span>18.8%</span>
                 </div>
               </div>
             </div>
@@ -437,11 +437,11 @@ export function ExecutiveOverview({ onNavigateTab, onOpenJson }: ExecutiveOvervi
               <div className="mt-3 space-y-1 text-xs">
                 <div className="flex justify-between text-[#10b981] font-bold">
                   <span>gemma3:4b</span>
-                  <span>66.7% 🏆</span>
+                  <span>83.3% 🏆</span>
                 </div>
                 <div className="flex justify-between text-[#64748b]">
                   <span>codellama:7b</span>
-                  <span>50.0%</span>
+                  <span>16.7%</span>
                 </div>
                 <div className="flex justify-between text-[#64748b]">
                   <span>starcoder2:3b</span>
@@ -450,7 +450,7 @@ export function ExecutiveOverview({ onNavigateTab, onOpenJson }: ExecutiveOvervi
               </div>
             </div>
             <p className="text-[10.5px] font-sans text-[#8b949e] border-t border-[#162035] pt-2 mt-2 leading-relaxed">
-              <strong>Why Gemma Won:</strong> Self-contained scripts matching exact assertion parameters without unrequested outer wrappers.
+              <strong>Why Gemma Won:</strong> Generated complete, runnable Python requests snippets with exact schema parameters and assert checks.
             </p>
           </div>
         </div>
@@ -504,10 +504,10 @@ export function ExecutiveOverview({ onNavigateTab, onOpenJson }: ExecutiveOvervi
           <div className="space-y-3 text-xs text-[#94a3b8] leading-relaxed">
             <div className="p-3 bg-[#080a0f] rounded-xl border border-[#141a24]">
               <span className="text-[#f1f5f9] font-semibold block mb-1">
-                1. Instruction-Tuning Dominates Raw Parameter Size
+                1. Instruction-Tuning &amp; Grounding Elevates Factual Correctness
               </span>
               <p>
-                <code className="text-[#60a5fa]">gemma3:4b</code> (4B parameters) outperformed <code className="text-[#38bdf8]">codellama:7b</code> (7B parameters) in general factual correctness (82.56% vs 81.79%) while responding <strong className="text-white">37% faster</strong> (15.75s vs 25.09s). Chat alignment enables models to directly answer developer questions rather than repeating prompts.
+                With all 21 dataset files indexed into ChromaDB, <code className="text-[#60a5fa]">gemma3:4b</code> achieved <strong className="text-white">71.15% average correctness</strong> (scoring &ge; 50% on every question), significantly outperforming <code className="text-[#38bdf8]">codellama:7b</code> (45.83%) while responding 29% faster (37.05s vs 52.00s).
               </p>
             </div>
 
@@ -516,7 +516,7 @@ export function ExecutiveOverview({ onNavigateTab, onOpenJson }: ExecutiveOvervi
                 2. Base Code-Completion Models Struggle with Open Q&amp;A
               </span>
               <p>
-                <code className="text-[#fbbf24]">starcoder2:3b</code> suffers from severe token runaways (averaging 1,753 tokens and 63.25s) because it treats instructions as code comments, generating hypothetical multiple-choice questions instead of direct solutions.
+                While <code className="text-[#fbbf24]">starcoder2:3b</code> improved to 32.12% with grounded context and provided the lowest latency (32.36s), it still exhibited runaway completions (averaging 871.5 completion tokens) due to treating conversational queries as code comments.
               </p>
             </div>
           </div>

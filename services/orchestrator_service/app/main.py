@@ -11,6 +11,8 @@ import asyncio
 import logging
 
 from .config import RAG_SERVICE_URL, INGESTION_SERVICE_URL, OLLAMA_URL, DEFAULT_MODEL
+from .context_suggester import suggest_context_files
+from .github_workspace import GitHubWorkspaceClient
 
 app = FastAPI(
     title="Archon Copilot Orchestrator Gateway",
@@ -52,12 +54,42 @@ class Message(BaseModel):
     role: str  # "user" | "assistant" | "system"
     content: str
 
+class ContextFile(BaseModel):
+    path: str
+    content: Optional[str] = None
+
 class AgentChatRequest(BaseModel):
     messages: List[Message]
     active_file_path: Optional[str] = None
     active_file_content: Optional[str] = None
+    context_files: Optional[List[ContextFile]] = None
     model: str = DEFAULT_MODEL
     temperature: Optional[float] = 0.2
+
+class SuggestFilesRequest(BaseModel):
+    prompt: str
+    active_file_path: Optional[str] = None
+    attached_files: Optional[List[str]] = None
+
+class GitHubOpenRequest(BaseModel):
+    repo_url: str  # "owner/repo" or full https URL
+    token: Optional[str] = None
+    branch: Optional[str] = None
+
+class GitHubSaveRequest(BaseModel):
+    owner: str
+    repo: str
+    path: str
+    content: str
+    commit_message: Optional[str] = "Update via Archon Copilot"
+    branch: str = "main"
+    sha: Optional[str] = None
+    token: Optional[str] = None
+
+class GitHubForkRequest(BaseModel):
+    owner: str
+    repo: str
+    token: str
 
 class FileContentRequest(BaseModel):
     path: str
@@ -448,6 +480,215 @@ async def terminal_exec(req: TerminalExecRequest):
             "cwd": cwd_str
         }
 
+# ── Codebase Knowledge Graph & SCIP Indexing ───────────────────────────
+
+GRAPH_CACHE_FILE = Path("/app/data/knowledge_graph.json") if os.path.exists("/app/data") else (WORKSPACE_ROOT / "knowledge_graph.json")
+ACTIVE_KNOWLEDGE_GRAPH = {"nodes": [], "edges": [], "stats": {}}
+
+def load_cached_knowledge_graph():
+    global ACTIVE_KNOWLEDGE_GRAPH
+    if GRAPH_CACHE_FILE.exists():
+        try:
+            ACTIVE_KNOWLEDGE_GRAPH = json_module.loads(GRAPH_CACHE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+load_cached_knowledge_graph()
+
+def collect_workspace_code_files(root: Path, max_files: int = 150) -> List[Dict[str, str]]:
+    """Walks the active workspace and gathers code/documentation files up to size limits."""
+    valid_exts = {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".json", ".yaml", ".yml", ".md"}
+    collected = []
+    
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in IGNORED_DIRS and not d.startswith(".")]
+        for fn in filenames:
+            ext = os.path.splitext(fn)[1].lower()
+            if ext in valid_exts:
+                if fn in [".DS_Store", "package-lock.json", "tsconfig.tsbuildinfo", "yarn.lock"]:
+                    continue
+                full_p = Path(dirpath) / fn
+                try:
+                    if full_p.is_file() and full_p.stat().st_size <= 500 * 1024:
+                        rel_p = str(full_p.relative_to(root)).replace("\\", "/")
+                        content = full_p.read_text(encoding="utf-8", errors="replace")
+                        collected.append({"path": rel_p, "content": content})
+                        if len(collected) >= max_files:
+                            return collected
+                except Exception:
+                    pass
+    return collected
+
+@app.get("/api/workspace/graph")
+def get_workspace_knowledge_graph():
+    """Returns the cached Knowledge Graph (nodes, edges, stats) for the active workspace."""
+    global ACTIVE_KNOWLEDGE_GRAPH
+    if not ACTIVE_KNOWLEDGE_GRAPH.get("nodes") and GRAPH_CACHE_FILE.exists():
+        load_cached_knowledge_graph()
+    return ACTIVE_KNOWLEDGE_GRAPH
+
+@app.post("/api/workspace/index-codebase")
+async def index_workspace_codebase():
+    """Extracts SCIP symbols across multi-language files, builds Knowledge Graph, and indexes into RAG."""
+    global ACTIVE_WORKSPACE_ROOT, ACTIVE_KNOWLEDGE_GRAPH
+    import time
+    start_time = time.time()
+    
+    files = collect_workspace_code_files(ACTIVE_WORKSPACE_ROOT, max_files=150)
+    if not files:
+        return {
+            "status": "warning",
+            "message": "No indexable code or documentation files found in workspace.",
+            "files_scanned": 0,
+            "total_chunks": 0,
+            "graph": {"nodes": [], "edges": []}
+        }
+    
+    # 1. Send files to Ingestion Service for SCIP AST extraction
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        try:
+            scip_resp = await client.post(
+                f"{INGESTION_SERVICE_URL}/api/scip/index",
+                json={"files": files}
+            )
+            if scip_resp.status_code != 200:
+                raise HTTPException(status_code=500, detail=f"SCIP Extraction Failed: {scip_resp.text}")
+            scip_data = scip_resp.json()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error connecting to Ingestion Service: {e}")
+        
+        chunks = scip_data.get("chunks", [])
+        graph = scip_data.get("graph", {"nodes": [], "edges": []})
+        stats = scip_data.get("stats", {})
+        
+        # 2. Ingest high-signal chunks into RAG Service
+        if chunks:
+            try:
+                rag_resp = await client.post(
+                    f"{RAG_SERVICE_URL}/api/ingest",
+                    json={"chunks": chunks}
+                )
+                if rag_resp.status_code != 200:
+                    print(f"Warning: RAG ingestion responded with {rag_resp.status_code}")
+            except Exception as e:
+                print(f"Warning: Failed to forward chunks to RAG: {e}")
+    
+    # 3. Persist Knowledge Graph to disk and memory
+    ACTIVE_KNOWLEDGE_GRAPH = {
+        "nodes": graph.get("nodes", []),
+        "edges": graph.get("edges", []),
+        "stats": stats,
+        "project": ACTIVE_WORKSPACE_ROOT.name,
+        "last_indexed": time.strftime("%Y-%m-%d %H:%M:%S")
+    }
+    try:
+        GRAPH_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        GRAPH_CACHE_FILE.write_text(json_module.dumps(ACTIVE_KNOWLEDGE_GRAPH, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"Warning: Failed to persist knowledge_graph.json: {e}")
+        
+    duration_ms = int((time.time() - start_time) * 1000)
+    
+    return {
+        "status": "success",
+        "project": ACTIVE_WORKSPACE_ROOT.name,
+        "files_scanned": len(files),
+        "endpoints_count": stats.get("endpoints", 0),
+        "functions_count": stats.get("functions", 0),
+        "classes_count": stats.get("classes", 0),
+        "total_chunks": len(chunks),
+        "graph_nodes_count": len(graph.get("nodes", [])),
+        "graph_edges_count": len(graph.get("edges", [])),
+        "duration_ms": duration_ms,
+        "graph": ACTIVE_KNOWLEDGE_GRAPH,
+        "stats": stats
+    }
+
+@app.post("/api/agent/suggest-files")
+async def api_suggest_files(req: SuggestFilesRequest):
+    """Evaluates developer prompt against Knowledge Graph to suggest 1-2 core context files (95/2 rule)."""
+    global ACTIVE_KNOWLEDGE_GRAPH
+    if not ACTIVE_KNOWLEDGE_GRAPH.get("nodes") and GRAPH_CACHE_FILE.exists():
+        load_cached_knowledge_graph()
+
+    suggestions = await suggest_context_files(
+        user_prompt=req.prompt,
+        knowledge_graph=ACTIVE_KNOWLEDGE_GRAPH,
+        active_file_path=req.active_file_path,
+        attached_files=req.attached_files
+    )
+    return {"suggestions": suggestions}
+
+# ── Clone-Free Remote GitHub Workspaces & Auto-Fork ───────────────────────
+
+@app.post("/api/github/open-repo")
+async def github_open_repo(req: GitHubOpenRequest):
+    """Opens a remote GitHub repository without local cloning, auditing push access."""
+    raw_url = req.repo_url.strip()
+    if "github.com/" in raw_url:
+        parts = raw_url.split("github.com/")[-1].strip("/").split("/")
+    else:
+        parts = raw_url.strip("/").split("/")
+    
+    if len(parts) < 2:
+        raise HTTPException(status_code=400, detail="Invalid GitHub repository format. Use 'owner/repo' or full GitHub URL.")
+    
+    owner = parts[0]
+    repo = parts[1].replace(".git", "")
+    
+    client = GitHubWorkspaceClient(token=req.token)
+    try:
+        repo_info = await client.get_repo_info(owner, repo, token=req.token)
+        branch = req.branch or repo_info.get("default_branch", "main")
+        tree = await client.get_tree(owner, repo, branch=branch, token=req.token)
+        return {
+            "status": "success",
+            "repo_info": repo_info,
+            "branch": branch,
+            "tree": tree
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/github/file")
+async def github_get_file(owner: str, repo: str, path: str, branch: str = "main", token: Optional[str] = None):
+    """Reads a single file blob from GitHub without cloning."""
+    client = GitHubWorkspaceClient(token=token)
+    try:
+        data = await client.get_file_content(owner, repo, path, branch, token=token)
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/github/save")
+async def github_save_file(req: GitHubSaveRequest):
+    """Directly commits updated file content to GitHub repository without local git clone."""
+    client = GitHubWorkspaceClient(token=req.token)
+    try:
+        res = await client.save_file_content(
+            owner=req.owner,
+            repo=req.repo,
+            path=req.path,
+            content=req.content,
+            commit_message=req.commit_message or f"Update {req.path} via Archon Copilot",
+            branch=req.branch,
+            sha=req.sha or "",
+            token=req.token
+        )
+        return res
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/github/fork")
+async def github_fork_repo(req: GitHubForkRequest):
+    """Forks a read-only repository to the authenticated user's account with 1-click."""
+    client = GitHubWorkspaceClient(token=req.token)
+    try:
+        res = await client.fork_repo(owner=req.owner, repo=req.repo, token=req.token)
+        return res
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 class DeleteItemRequest(BaseModel):
     path: str
 
@@ -660,26 +901,28 @@ async def agent_chat(req: AgentChatRequest):
                         context_chunks = []
                         for rank, c in enumerate(valid_chunks, 1):
                             raw_txt = c["text"]
-                            context_chunks.append(f"[Spec Citation #{rank}]\n{raw_txt}")
-
-                            title = "API Specification"
-                            file_name = "spec.yaml"
-                            if "slack" in raw_txt.lower():
-                                title = "Slack Webhook & Chat API"
-                                file_name = "slack_spec.yaml"
-                            elif "twilio" in raw_txt.lower() or "sms" in raw_txt.lower():
-                                title = "Twilio Messaging REST API"
-                                file_name = "twilio_sms.json"
-                            elif "stripe" in raw_txt.lower() or "payment" in raw_txt.lower() or "refund" in raw_txt.lower():
-                                title = "Enterprise Payments API v2.1.0"
-                                file_name = "payments_v2.yaml"
+                            chunk_type = c.get("chunk_type", "api_spec")
+                            file_name = c.get("file_path") or c.get("source") or "spec.yaml"
+                            symbol_name = c.get("symbol_name") or c.get("endpoint") or ""
+                            line_range = c.get("line_range") or ""
+                            
+                            if chunk_type == "code_symbol":
+                                title = f"Code Symbol: {symbol_name}" if symbol_name else f"Code: {file_name}"
+                                citation_header = f"[Code Citation #{rank}: {file_name} {line_range}]"
+                            else:
+                                title = c.get("api_title") or "API Specification"
+                                citation_header = f"[Spec Citation #{rank}: {file_name}]"
+                                
+                            context_chunks.append(f"{citation_header}\n{raw_txt}")
 
                             rag_sources_list.append({
                                 "title": title,
                                 "file": file_name,
-                                "score": c.get("score", "0.92"),
-                                "rank": c.get("rank", 1),
-                                "text": raw_txt
+                                "score": str(c.get("score", "0.92")),
+                                "rank": c.get("rank", rank),
+                                "text": raw_txt,
+                                "line_range": line_range,
+                                "chunk_type": chunk_type
                             })
                         rag_context = "\n\n---\n\n".join(context_chunks)
         except Exception as e:
@@ -735,6 +978,23 @@ You write clean, modular, production-ready code with rigorous adherence to best 
             system_prompt += f"\n\n### Current Active Editor File: `{req.active_file_path}` (Non-Empty Existing Code):\n```\n{file_preview}\n```\n"
         else:
             system_prompt += f"\n\n### Current Active Editor File: `{req.active_file_path}` (Currently EMPTY / NEW FILE - Provide complete implementation, DO NOT use SEARCH/REPLACE diffs).\n"
+
+    if req.context_files:
+        context_files_text = []
+        for cf in req.context_files:
+            c_text = (cf.content or "").strip()
+            if not c_text:
+                try:
+                    fpath = resolve_file_or_workspace_path(cf.path)
+                    if fpath.is_file():
+                        c_text = fpath.read_text(encoding="utf-8", errors="replace").strip()
+                except Exception:
+                    pass
+            if c_text:
+                preview = (c_text[:15000] + "\n...[truncated]") if len(c_text) > 15000 else c_text
+                context_files_text.append(f"### Attached User Context File: `{cf.path}`\n```\n{preview}\n```")
+        if context_files_text:
+            system_prompt += "\n\n" + "\n\n".join(context_files_text) + "\n"
 
     # Build clean structured message history for Ollama /api/chat
     ollama_messages = [{"role": "system", "content": system_prompt}]

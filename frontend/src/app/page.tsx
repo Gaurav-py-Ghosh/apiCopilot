@@ -3,6 +3,11 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { EvaluationDashboard } from './components/EvaluationDashboard';
+import CodeKnowledgeGraph, { KnowledgeGraphData } from './components/CodeKnowledgeGraph';
+import SourcegraphIndexDrawer from './components/SourcegraphIndexDrawer';
+import ContextFileChips, { ContextFileItem, SuggestedFileItem } from './components/ContextFileChips';
+import GitHubOpenModal, { GitHubRepoInfo } from './components/GitHubOpenModal';
+import AutoForkPromptModal from './components/AutoForkPromptModal';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
@@ -848,6 +853,13 @@ function FileTreeNode({
     <div>
       <div
         onClick={handleClick}
+        draggable={!isDir}
+        onDragStart={(e) => {
+          if (!isDir) {
+            e.dataTransfer.setData("application/json", JSON.stringify({ path: node.path, name: node.name }));
+            e.dataTransfer.effectAllowed = "copy";
+          }
+        }}
         style={{ paddingLeft: `${depth * 14 + 8}px` }}
         className={`flex items-center gap-1.5 py-1 px-1.5 rounded cursor-pointer text-[12px] font-mono select-none transition-colors group relative ${
           isActive
@@ -1015,6 +1027,19 @@ function VSCodeAgentIDE({
   const [recentProjects, setRecentProjects] = useState<string[]>(['D:/AIDeV', 'C:/Users/gaura']);
   const [showOpenProjectModal, setShowOpenProjectModal] = useState(false);
   const [showApiKeysModal, setShowApiKeysModal] = useState(false);
+  const [showIndexDrawer, setShowIndexDrawer] = useState(false);
+  const [showKnowledgeGraph, setShowKnowledgeGraph] = useState(false);
+  const [knowledgeGraphData, setKnowledgeGraphData] = useState<KnowledgeGraphData | null>(null);
+  
+  // Remote Clone-Free GitHub Workspace State
+  const [showGitHubModal, setShowGitHubModal] = useState(false);
+  const [showAutoForkModal, setShowAutoForkModal] = useState(false);
+  const [githubRepoInfo, setGithubRepoInfo] = useState<GitHubRepoInfo | null>(null);
+  const [githubToken, setGithubToken] = useState('');
+  const [isGitHubWorkspace, setIsGitHubWorkspace] = useState(false);
+  const [currentGitHubBranch, setCurrentGitHubBranch] = useState('main');
+  const [remoteFileShas, setRemoteFileShas] = useState<Record<string, string>>({});
+
   const [apiKeys, setApiKeys] = useState<{[provider: string]: {configured: boolean; masked_key: string}}>({});
   const [apiKeyInputs, setApiKeyInputs] = useState<{[provider: string]: string}>({openai: '', anthropic: '', gemini: ''});
   const [apiKeySaveStatus, setApiKeySaveStatus] = useState<{[provider: string]: string}>({});
@@ -1090,6 +1115,69 @@ function VSCodeAgentIDE({
   const [includeFileContext, setIncludeFileContext] = useState(true);
   const chatScrollRef = useRef<HTMLDivElement>(null);
 
+  // Attached Context Files & OmniKey 95/2 File Suggestions
+  const [contextFiles, setContextFiles] = useState<ContextFileItem[]>([]);
+  const [suggestedFiles, setSuggestedFiles] = useState<SuggestedFileItem[]>([]);
+  const [isDraggingOverChat, setIsDraggingOverChat] = useState(false);
+
+  const handleAddContextFile = async (path: string, name?: string) => {
+    if (contextFiles.some(f => f.path === path)) return;
+    const fileName = name || path.split('/').pop() || path;
+    const item: ContextFileItem = { path, name: fileName };
+    setContextFiles(prev => [...prev, item]);
+
+    try {
+      const res = await fetch(`${apiBase}/api/workspace/file?path=${encodeURIComponent(path)}`);
+      if (res.ok) {
+        const data = await res.json();
+        setContextFiles(prev => prev.map(f => f.path === path ? { ...f, content: data.content } : f));
+      }
+    } catch (e) {
+      console.error("Failed to read context file content", e);
+    }
+  };
+
+  const handleRemoveContextFile = (path: string) => {
+    setContextFiles(prev => prev.filter(f => f.path !== path));
+  };
+
+  // Debounced 95/2 Rule Pre-Prompt Suggestion via OmniKey
+  useEffect(() => {
+    const trimmed = agentInput.trim();
+    const words = trimmed.split(/\s+/).filter(Boolean);
+
+    // Fire after 3+ words AND 1.5s pause
+    if (words.length < 3) {
+      setSuggestedFiles([]);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      try {
+        const activeTab = openTabs.find(t => t.path === activeTabPath);
+        const res = await fetch(`${apiBase}/api/agent/suggest-files`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: trimmed,
+            active_file_path: activeTab?.path || null,
+            attached_files: contextFiles.map(c => c.path)
+          })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.suggestions)) {
+            setSuggestedFiles(data.suggestions);
+          }
+        }
+      } catch (err) {
+        console.error("Failed to fetch file suggestions", err);
+      }
+    }, 1500);
+
+    return () => clearTimeout(timer);
+  }, [agentInput, activeTabPath, contextFiles, apiBase, openTabs]);
+
   // Synchronized Editor Scrolling (Textarea -> Gutter & Syntax Highlight Layer)
   const handleEditorScroll = (e: React.UIEvent<HTMLTextAreaElement>) => {
     const target = e.currentTarget;
@@ -1130,6 +1218,15 @@ function VSCodeAgentIDE({
   useEffect(() => {
     fetchProjectsAndTree();
     fetchApiKeyStatus();
+    // Fetch cached Knowledge Graph if present
+    fetch(`${apiBase}/api/workspace/graph`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (d && d.nodes && d.nodes.length > 0) {
+          setKnowledgeGraphData(d);
+        }
+      })
+      .catch(() => {});
   }, [apiBase]);
 
   // Open Any Custom Folder / Project (with create_if_missing)
@@ -1364,7 +1461,7 @@ function VSCodeAgentIDE({
     }
   }, [agentMessages]);
 
-  // Open a file from explorer
+  // Open a file from explorer (Local or Remote GitHub)
   const handleOpenFile = async (path: string) => {
     const existing = openTabs.find(t => t.path === path);
     if (existing) {
@@ -1374,6 +1471,35 @@ function VSCodeAgentIDE({
       return;
     }
 
+    // Remote GitHub Workspace file fetch
+    if (isGitHubWorkspace && githubRepoInfo) {
+      try {
+        const url = `${apiBase}/api/github/file?owner=${githubRepoInfo.owner}&repo=${githubRepoInfo.repo}&path=${encodeURIComponent(path)}&branch=${currentGitHubBranch}${githubToken ? `&token=${encodeURIComponent(githubToken)}` : ''}`;
+        const res = await fetch(url);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.sha) {
+            setRemoteFileShas(prev => ({ ...prev, [path]: data.sha }));
+          }
+          const newTab = {
+            path: data.path,
+            name: path.split('/').pop() || path,
+            content: data.content,
+            original: data.content
+          };
+          setOpenTabs(prev => [...prev, newTab]);
+          setActiveTabPath(data.path);
+          setEditorContent(data.content);
+          setIsDirty(false);
+          setFoldedLines({});
+          return;
+        }
+      } catch (err) {
+        console.error("Could not read remote GitHub file", err);
+      }
+    }
+
+    // Local workspace file fetch
     try {
       const res = await fetch(`${apiBase}/api/workspace/file?path=${encodeURIComponent(path)}`);
       if (res.ok) {
@@ -1474,9 +1600,54 @@ function VSCodeAgentIDE({
     });
   };
 
-  // Save file to backend (Ctrl+S)
+  // Save file to backend or GitHub commit (Ctrl+S)
   const handleSaveFile = async () => {
     if (!activeTabPath) return;
+
+    // Direct commit to remote GitHub repository without local cloning
+    if (isGitHubWorkspace && githubRepoInfo) {
+      setSaveStatus('Committing to GitHub...');
+      try {
+        const res = await fetch(`${apiBase}/api/github/save`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            owner: githubRepoInfo.owner,
+            repo: githubRepoInfo.repo,
+            path: activeTabPath,
+            content: editorContent,
+            commit_message: `Update ${activeTabPath} via Archon Copilot`,
+            branch: currentGitHubBranch,
+            sha: remoteFileShas[activeTabPath] || undefined,
+            token: githubToken || undefined
+          })
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (data.new_file_sha) {
+            setRemoteFileShas(prev => ({ ...prev, [activeTabPath]: data.new_file_sha }));
+          }
+          setOpenTabs(prev => prev.map(t => t.path === activeTabPath ? { ...t, original: editorContent } : t));
+          setIsDirty(false);
+          setSaveStatus('✓ Committed to GitHub');
+          setLastAppliedNotice(null);
+          setTimeout(() => setSaveStatus(''), 2500);
+          return;
+        } else {
+          const errData = await res.text();
+          setSaveStatus('❌ Commit Failed');
+          alert(`GitHub Commit Failed: ${errData}`);
+          return;
+        }
+      } catch (e: any) {
+        setSaveStatus('❌ Commit Failed');
+        alert(`GitHub Commit Error: ${e?.message || e}`);
+        return;
+      }
+    }
+
+    // Local workspace save
     setSaveStatus('Saving...');
     try {
       const res = await fetch(`${apiBase}/api/workspace/file`, {
@@ -1828,6 +1999,7 @@ function VSCodeAgentIDE({
     const newHistory = [...agentMessages, userMsg];
     setAgentMessages(prev => [...prev, userMsg, assistantMsg]);
     setAgentInput('');
+    setSuggestedFiles([]);
     setAgentLoading(true);
 
     try {
@@ -1839,6 +2011,7 @@ function VSCodeAgentIDE({
           messages: newHistory.map(m => ({ role: m.role, content: m.content })),
           active_file_path: includeFileContext && activeTab ? activeTab.path : null,
           active_file_content: includeFileContext && activeTab ? editorContent : null,
+          context_files: contextFiles.map(cf => ({ path: cf.path, content: cf.content })),
           model: selectedModel
         })
       });
@@ -2053,6 +2226,29 @@ function VSCodeAgentIDE({
               >
                 <Icons.FolderClosed />
               </button>
+              <button
+                onClick={() => setShowGitHubModal(true)}
+                title="Open Remote GitHub Repository (Clone-Free)"
+                className="text-[#64748b] hover:text-white p-1 rounded hover:bg-[#161922] cursor-pointer"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+                </svg>
+              </button>
+              <button
+                onClick={() => setShowIndexDrawer(true)}
+                title="Index Codebase with SCIP & Knowledge Graph"
+                className="text-cyan-400 hover:text-cyan-300 p-1 rounded hover:bg-[#161922] cursor-pointer"
+              >
+                ⚡
+              </button>
+              <button
+                onClick={() => setShowKnowledgeGraph(true)}
+                title="View Codebase Knowledge Graph"
+                className="text-slate-400 hover:text-cyan-400 p-1 rounded hover:bg-[#161922] cursor-pointer"
+              >
+                🌐
+              </button>
             </div>
           </div>
 
@@ -2224,6 +2420,25 @@ function VSCodeAgentIDE({
                     ● Unsaved
                   </span>
                 )}
+                <button
+                  onClick={() => setShowIndexDrawer(true)}
+                  title="Index Codebase with SCIP & Knowledge Graph"
+                  className="bg-cyan-950/40 hover:bg-cyan-900/60 text-cyan-300 px-2.5 py-1 rounded text-[11px] font-mono transition-colors border border-cyan-800/40 cursor-pointer flex items-center gap-1.5 shadow-sm"
+                >
+                  <span>⚡ Index Codebase</span>
+                </button>
+                <button
+                  onClick={() => setShowKnowledgeGraph(true)}
+                  title="Open Knowledge Graph Visualizer"
+                  className="bg-[#121622] hover:bg-[#1a2030] text-slate-300 px-2.5 py-1 rounded text-[11px] font-mono transition-colors border border-[#252f44] cursor-pointer flex items-center gap-1.5 shadow-sm"
+                >
+                  <span>🌐 Graph</span>
+                  {knowledgeGraphData?.nodes?.length ? (
+                    <span className="text-[9.5px] px-1.5 py-0.2 rounded bg-cyan-950 text-cyan-300 border border-cyan-800 font-bold">
+                      {knowledgeGraphData.nodes.length}
+                    </span>
+                  ) : null}
+                </button>
                 <button
                   onClick={handleSaveFile}
                   title="Save (Ctrl+S)"
@@ -2715,8 +2930,38 @@ function VSCodeAgentIDE({
             </div>
           )}
 
-          <div className="p-3 border-t border-[#161922] bg-[#090b0e]">
-            <div className="relative border border-[#1e232e] focus-within:border-[#3b82f6]/50 rounded-lg bg-[#08090a] transition-all">
+          <div 
+            className="p-3 border-t border-[#161922] bg-[#090b0e]"
+            onDragOver={(e) => {
+              e.preventDefault();
+              setIsDraggingOverChat(true);
+            }}
+            onDragLeave={() => setIsDraggingOverChat(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setIsDraggingOverChat(false);
+              try {
+                const dataStr = e.dataTransfer.getData("application/json");
+                if (dataStr) {
+                  const data = JSON.parse(dataStr);
+                  if (data.path) {
+                    handleAddContextFile(data.path, data.name);
+                  }
+                }
+              } catch {}
+            }}
+          >
+            <div className="relative border border-[#1e232e] focus-within:border-[#3b82f6]/50 rounded-lg bg-[#08090a] transition-all overflow-hidden">
+              <ContextFileChips
+                contextFiles={contextFiles}
+                onRemoveFile={handleRemoveContextFile}
+                suggestedFiles={suggestedFiles}
+                onAddSuggestedFile={(sug) => {
+                  handleAddContextFile(sug.path);
+                  setSuggestedFiles(prev => prev.filter(s => s.path !== sug.path));
+                }}
+                isDraggingOver={isDraggingOverChat}
+              />
               <textarea
                 value={agentInput}
                 onChange={(e) => setAgentInput(e.target.value)}
@@ -3155,6 +3400,117 @@ function VSCodeAgentIDE({
           </div>
         </div>
       )}
+
+      {/* ── Sourcegraph SCIP Indexing Drawer ───────────────────────── */}
+      <SourcegraphIndexDrawer
+        isOpen={showIndexDrawer}
+        onClose={() => setShowIndexDrawer(false)}
+        projectName={currentProjectName}
+        apiBase={apiBase}
+        onIndexingComplete={(data) => {
+          setKnowledgeGraphData(data);
+        }}
+        onOpenGraph={() => setShowKnowledgeGraph(true)}
+      />
+
+      {/* ── Interactive 60fps Canvas Knowledge Graph Visualizer ────── */}
+      {showKnowledgeGraph && (
+        <CodeKnowledgeGraph
+          graphData={knowledgeGraphData}
+          onClose={() => setShowKnowledgeGraph(false)}
+          onOpenFile={(path) => {
+            handleOpenFile(path);
+          }}
+        />
+      )}
+
+      {/* ── Remote GitHub Workspace Modal ─────────────────────────── */}
+      <GitHubOpenModal
+        isOpen={showGitHubModal}
+        onClose={() => setShowGitHubModal(false)}
+        apiBase={apiBase}
+        onOpenRepo={(info, branch, tree, token) => {
+          setGithubRepoInfo(info);
+          setGithubToken(token);
+          setIsGitHubWorkspace(true);
+          setCurrentGitHubBranch(branch);
+          setCurrentProjectName(info.full_name);
+          setGitBranch(branch);
+          setWorkspaceTree(tree);
+          setOpenTabs([]);
+          setActiveTabPath('');
+          setEditorContent('');
+        }}
+        onForkNeeded={(info, token) => {
+          setGithubRepoInfo(info);
+          setGithubToken(token);
+          setShowAutoForkModal(true);
+        }}
+      />
+
+      {/* ── Auto-Fork Prompt Modal ─────────────────────────────────── */}
+      <AutoForkPromptModal
+        isOpen={showAutoForkModal}
+        onClose={() => setShowAutoForkModal(false)}
+        repoInfo={githubRepoInfo}
+        token={githubToken}
+        apiBase={apiBase}
+        onForkSuccess={async (forkOwner, forkRepo, defaultBranch) => {
+          try {
+            const res = await fetch(`${apiBase}/api/github/open-repo`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                repo_url: `${forkOwner}/${forkRepo}`,
+                token: githubToken,
+                branch: defaultBranch
+              })
+            });
+            if (res.ok) {
+              const data = await res.json();
+              setGithubRepoInfo(data.repo_info);
+              setIsGitHubWorkspace(true);
+              setCurrentGitHubBranch(data.branch);
+              setCurrentProjectName(data.repo_info.full_name);
+              setGitBranch(data.branch);
+              setWorkspaceTree(data.tree);
+              setOpenTabs([]);
+              setActiveTabPath('');
+              setEditorContent('');
+            }
+          } catch (e) {
+            console.error("Failed to open forked repository", e);
+          }
+        }}
+        onContinueReadOnly={async () => {
+          if (githubRepoInfo) {
+            try {
+              const res = await fetch(`${apiBase}/api/github/open-repo`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  repo_url: githubRepoInfo.full_name,
+                  token: githubToken || undefined,
+                  branch: githubRepoInfo.default_branch
+                })
+              });
+              if (res.ok) {
+                const data = await res.json();
+                setIsGitHubWorkspace(true);
+                setCurrentGitHubBranch(data.branch);
+                setCurrentProjectName(data.repo_info.full_name);
+                setGitBranch(data.branch);
+                setWorkspaceTree(data.tree);
+                setOpenTabs([]);
+                setActiveTabPath('');
+                setEditorContent('');
+              }
+            } catch (e) {
+              console.error("Failed to open read-only repository", e);
+            }
+          }
+        }}
+      />
     </div>
   );
 }

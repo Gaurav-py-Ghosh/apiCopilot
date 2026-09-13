@@ -6,6 +6,7 @@ import os
 
 from .config import PORT, DATASET_DIR
 from .chunker import chunk_file_content
+from .scip_extractor import SCIPExtractor
 
 app = FastAPI(
     title="Ingestion & Schema Microservice",
@@ -71,3 +72,17 @@ def parse_dataset():
         "total_chunks": len(all_chunks),
         "chunks": all_chunks
     }
+
+class FileItem(BaseModel):
+    path: str
+    content: str
+
+class CodebaseIndexRequest(BaseModel):
+    files: List[FileItem]
+
+@app.post("/api/scip/index")
+def scip_index_codebase(req: CodebaseIndexRequest):
+    """Parses a batch of codebase files and returns high-signal SCIP chunks and Knowledge Graph."""
+    extractor = SCIPExtractor()
+    file_dicts = [{"path": f.path, "content": f.content} for f in req.files]
+    return extractor.index_codebase(file_dicts)

@@ -34,9 +34,9 @@ flowchart LR
 ```
 
 ### Key Activity Findings:
-1. **Model Performance Champion (`gemma3:4b` — 48.08% Correctness):** Google's `gemma3:4b` established the best balance between factual API accuracy, concise conversational synthesis, and low latency (33.2s). Meta's `codellama:7b` (40.90% correctness, 47.9s latency) proved strongest for syntax-compliant code synthesis. BigCode's `starcoder2:3b` (9.62% correctness) suffered from fundamental base-completion architectural collapse on instruction tasks.
-2. **Critical Retrieval Root Cause Discovery:** Investigation into widespread `"wrong"` retrieval classifications uncovered that ChromaDB was severely out of sync—containing only 24 chunks from 10 files instead of the full 21-file corpus. Consequently, **18 out of 26 benchmark questions (69.2%) were mathematically impossible for the retriever to satisfy**.
-3. **Parametric Memory Masking:** Despite RAG retrieval failures on missing documents, instructed LLMs frequently synthesized accurate answers from pre-trained parametric memory, exposing the boundary between model knowledge and RAG grounding.
+1. **Model Performance Champion (`gemma3:4b` — 71.15% Correctness):** With the complete 21-file corpus indexed into ChromaDB, Google's `gemma3:4b` achieved a massive **+23.07% leap in factual correctness** (rising from 48.08% $\rightarrow$ 71.15%), scoring at least 50% on every single benchmark question with a 66.67% code pass rate and 0.2228 context relevance.
+2. **Hallucination & Fidelity Champion (`codellama:7b` — 1 Flag):** Meta's `codellama:7b` (45.83% correctness, 52.0s latency) demonstrated near-zero endpoint fabrication, reducing endpoint hallucinations to just **1 single flag** across all 26 questions, outperforming all models on two-file cross-referencing (66.7%).
+3. **Retrieval Pipeline Transformation (0% "Wrong" Rate):** Following resolution of the vector store ingestion gap (syncing all 21 dataset files / 83 chunks into ChromaDB), **0 out of 78 evaluations were categorized as `"wrong"`** (73.1% correct, 19.2% partial multi-hop, 7.7% intentional decoys), proving that grounding failures were driven by database omission rather than neural retriever ranking collapse.
 
 ---
 
@@ -123,25 +123,25 @@ The evaluation dataset was constructed across 5 functional categories to test ba
 
 ---
 
-### 3.2 Aggregate Performance Benchmark Table (Run ID: `420b0299`)
+### 3.2 Aggregate Performance Benchmark Table (Run ID: `f2cd6546`)
 
-The table below reflects the standardized **78-run evaluation** scored by **`qwen2.5:7b` CoT Judge** (91.0% LLM-adjudicated, 9.0% keyword fallback):
+The table below reflects the fully grounded **78-run evaluation** scored by **`qwen2.5:7b` CoT Judge** (100% evaluated with full 21-file corpus indexed):
 
 | Metric                          | `gemma3:4b`         | `codellama:7b`      | `starcoder2:3b`     |
 | ------------------------------- | ------------------- | ------------------- | ------------------- |
 | **Total Evaluations**           | 26                  | 26                  | 26                  |
-| **Average Correctness**         | **48.08%** (0.4808) | 40.90% (0.4090)     | 9.62% (0.0962)      |
-| **Max / Min Correctness**       | 1.00 / 0.00         | 1.00 / 0.00         | 0.50 / 0.00         |
-| **Average Context Relevance**   | **0.1623**          | 0.1174              | 0.0928              |
-| **Average Latency (s)**         | 33.21s              | 47.89s              | **32.93s**          |
-| **Latency Range [Min, Max]**    | [27.43s, 41.05s]    | [30.29s, 60.06s]    | [13.83s, 60.07s]    |
-| **Avg Prompt Tokens**           | 514.9               | 440.8               | 421.8               |
-| **Avg Generated Tokens**        | 406.3               | 139.4               | 665.1 (Runaway)     |
-| **Avg Total Tokens**            | 921.3               | 580.2               | 1086.9              |
-| **Code Pass Rate (Q24–Q26)**    | **33.3%** (1/3)     | **33.3%** (1/3)     | 0.0% (0/3)          |
-| **Unrecognized Endpoint Flags** | 6                   | 6                   | 6                   |
-| **Average Process RAM (MB)**    | 64.62 MB            | 65.01 MB            | 65.07 MB            |
-| **Average CPU Utilization (%)** | **4.02%** (10.4% pk)| 14.66% (45.3% pk)   | 5.12% (10.8% pk)    |
+| **Average Correctness**         | **71.15%** (0.7115) | 45.83% (0.4583)     | 32.12% (0.3212)     |
+| **Max / Min Correctness**       | 1.00 / **0.50**     | 1.00 / 0.00         | 1.00 / 0.00         |
+| **Average Context Relevance**   | **0.2228**          | 0.1319              | 0.2209              |
+| **Average Latency (s)**         | 37.05s              | 52.00s              | **32.36s**          |
+| **Latency Range [Min, Max]**    | [31.06s, 45.38s]    | [37.14s, 60.07s]    | [14.18s, 60.07s]    |
+| **Avg Prompt Tokens**           | 622.3               | 403.9               | 528.8               |
+| **Avg Generated Tokens**        | 456.8               | **87.5** (Concise)  | 871.5 (Runaway)     |
+| **Avg Total Tokens**            | 1079.1              | 491.4               | 1400.3              |
+| **Code Pass Rate (Q24–Q26)**    | **66.7%** (2/3)     | 0.0% (0/3)          | 0.0% (0/3)          |
+| **Unrecognized Endpoint Flags** | 7                   | **1** (Fidelity Win)| 6                   |
+| **Average Process RAM (MB)**    | 63.84 MB            | 64.09 MB            | 64.32 MB            |
+| **Average CPU Utilization (%)** | **4.08%** (10.7% pk)| 13.86% (47.1% pk)   | 4.96% (11.1% pk)    |
 | **Primary Scoring Mode**        | CoT LLM (Qwen-7B)   | CoT LLM (Qwen-7B)   | CoT LLM (Qwen-7B)   |
 
 ---
@@ -150,42 +150,41 @@ The table below reflects the standardized **78-run evaluation** scored by **`qwe
 
 ### 4.1 Comparative Findings
 
-1. **Accuracy & Factual Synthesis Leader: `gemma3:4b` (48.08% Average Correctness)**
-   - Demonstrated superior instruction-following across both single-file and multi-hop queries.
-   - Summarized complex documentation into structured markdown tables without hallucinating imaginary endpoint schemas.
-   - Maintains the lowest memory footprint (64.62 MB process RSS) and well-regulated CPU utilization (4.02% average, 10.4% peak).
+1. **Accuracy & Factual Synthesis Leader: `gemma3:4b` (71.15% Average Correctness)**
+   - Benefited most dramatically from complete RAG grounding, leaping from 48.08% $\rightarrow$ **71.15% (+23.07% gain)**.
+   - Maintained a floor score of **0.50** (did not fail a single question), correctly extracting complex OpenAPI schema parameters and synthesizing cross-file dependencies into clear markdown documentation.
+   - Led code pass rate at **66.7% (2/3)**, while operating with minimal CPU utilization (4.08% average).
 
-2. **Code Specialization & Conciseness: `codellama:7b` (40.90% Correctness, 139.4 Completion Tokens)**
-   - Produced the cleanest, most concise code snippets with exact request headers (`Authorization: Bearer`, `Idempotency-Key`).
-   - Avoided conversational filler text, generating directly actionable Python/cURL snippets.
-   - Incurred higher average latency (47.89s) and heavy CPU spikes (45.28% peak) due to larger 7B parameter footprint on CPU/WSL inference.
+2. **Hallucination & Conciseness Champion: `codellama:7b` (45.83% Correctness, 1 Flag)**
+   - Demonstrated exceptional fidelity, reducing unrecognized endpoint flags to just **1 single occurrence** across 26 questions.
+   - Achieved the highest score on **Group 2 Two-File Cross-Referencing (66.7%)**, accurately bridging disparate OpenAPI specs.
+   - Generated the most concise outputs (87.5 completion tokens), but incurred higher latency (52.00s) and higher CPU spikes (47.12% peak).
 
-3. **Base Completion Architectural Failure: `starcoder2:3b` (9.62% Correctness)**
-   - **Architectural Root Cause:** BigCode’s `starcoder2:3b` is a foundational next-token code-completion model, **not an instruction-fine-tuned assistant**.
-   - **Prompt Template Echoing:** When presented with instruction prompts (`"Answer the developer's question based on context..."`), it failed to recognize dialogue turn boundaries, echoing prompt text or entering infinite repetition loops (averaging 665.1 completion tokens vs 139–406 for instructed models).
-   - **Context Table Saturation:** Inability to perform selective key-value extraction across dense OpenAPI parameter tables.
+3. **Grounded Lift & Latency Leader: `starcoder2:3b` (32.12% Correctness, 32.36s Latency)**
+   - Correctness improved substantially from **9.62% $\rightarrow$ 32.12% (+22.50% gain)** once relevant documentation was present in context, reaching perfect 1.0 scores on multiple single-file and cross-reference queries.
+   - Lowest average latency (32.36s), but continued to exhibit runaway completion loops (871.5 avg completion tokens) on conversational questions due to its base completion architecture.
 
 ### 4.2 Category-by-Category Winner Breakdown
 
 | Question Category | Tested Skill | `gemma3:4b` | `codellama:7b` | `starcoder2:3b` | Category Winner & Insight |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Group 1: Single-File Baseline (Q1–Q7)** | Exact endpoint & field lookup | **50.0%** | 44.3% | 14.3% | **`gemma3:4b`** — Exact schema parameter extraction |
-| **Group 2: Two-File Cross-Ref (Q8–Q14)** | Spec + Architectural Guide | **47.6%** | 40.5% | 11.9% | **`gemma3:4b`** — Cross-spec bridging |
-| **Group 3: Multi-File / Multi-Hop (Q15–Q19)** | $\ge 3$ Service Chaining | **46.7%** | 40.0% | 0.0% | **`gemma3:4b`** — Multi-step causal flow synthesis |
-| **Group 4: Decoy & Failure Modes (Q20–Q23)** | Hard Negatives & Glossary | **41.7%** | **41.7%** | 16.7% | **Tied (`gemma3` & `codellama`)** — Both resisted decoy traps |
-| **Group 5: Code Synthesis (Q24–Q26)** | Python AST & Requests Syntax | **33.3%** | **33.3%** | 0.0% | **Tied (`codellama:7b` cleanest syntax)** |
+| **Group 1: Single-File Baseline (Q1–Q7)** | Exact endpoint & field lookup | **80.0%** | 50.0% | 42.9% | **`gemma3:4b`** — Schema parameter accuracy |
+| **Group 2: Two-File Cross-Ref (Q8–Q14)** | Spec + Architectural Guide | 54.3% | **66.7%** | 31.4% | **`codellama:7b`** — Multi-spec bridging champion |
+| **Group 3: Multi-File / Multi-Hop (Q15–Q19)** | $\ge 3$ Service Chaining | **70.0%** | 50.0% | 38.0% | **`gemma3:4b`** — Causal flow synthesis |
+| **Group 4: Decoy & Failure Modes (Q20–Q23)** | Hard Negatives & Glossary | **77.5%** | 18.8% | 18.8% | **`gemma3:4b`** — Defends against glossary decoys |
+| **Group 5: Code Synthesis (Q24–Q26)** | Python AST & Requests Syntax | **83.3%** | 16.7% | 16.7% | **`gemma3:4b`** — Valid runnable code synthesis |
 
 ### 4.3 Quality–Latency–Resource Trade-Off Analysis
 
 ```text
 Pareto Frontier (Latency vs CoT Factual Correctness):
-  gemma3:4b    :  ████████████████████ 48.1% (33.2s latency) -> DOMINATES PARETO FRONTIER
-  codellama:7b :  █████████████████   40.9% (47.9s latency) -> STRONGEST SYNTAX / HEADERS
-  starcoder2:3b:  ████                9.6%  (32.9s latency) -> UNFAVORABLE (COMPLETION BREAKDOWN)
+  gemma3:4b    :  ████████████████████ 71.2% (37.1s latency) -> DOMINATES QUALITY & RELEVANCE
+  codellama:7b :  █████████████        45.8% (52.0s latency) -> MINIMAL HALLUCINATIONS (1 FLAG)
+  starcoder2:3b:  █████████            32.1% (32.4s latency) -> LOWEST LATENCY / FASTEST
 ```
 
-- **Efficiency Frontier:** `gemma3:4b` dominates the Pareto frontier for general API Copilot operations, providing the highest accuracy (48.08%) at 33.21s response latency.
-- **Enterprise Routing Architecture:** A hybrid router should dispatch documentation, routing, and architectural queries to `gemma3:4b`, while delegating explicit programmatic code synthesis (`/generate`, `/test`) to `codellama:7b`. Base completion models (`starcoder2`) should be restricted to IDE autocomplete / inline fill-in-the-middle, not conversational RAG.
+- **Efficiency Frontier:** `gemma3:4b` establishes clear leadership on the Pareto frontier for general API Copilot operations, providing the highest accuracy (71.15%) and relevance (0.2228) at 37.05s latency.
+- **Enterprise Routing Architecture:** A hybrid router should route user-facing technical documentation, architectural synthesis, and code generation to `gemma3:4b`. For high-security environments where endpoint fabrication risk must approach zero, `codellama:7b` provides the ultimate fidelity shield. Base completion models (`starcoder2:3b`) should be dedicated to inline code autocomplete rather than conversational RAG.
 
 ---
 
@@ -245,10 +244,23 @@ $$\text{retrieved\_sources} \cap \text{expected\_sources} = \emptyset \implies \
 | **Partially Impossible** | **7 / 26 (26.9%)** | Q2, Q14, Q15, Q17, Q19, Q21, Q25 | Only 1 or 2 required files existed in ChromaDB; intermediate dependencies were missing. Could at best achieve `"partial"`, or fell to `"wrong"` if top-5 cross-encoder ranking selected other available specs. |
 | **Fully Indexable** | **1 / 26 (3.8%)** | Q3 (`slack_dev_guide.md`, `slack_v1.yaml`) | **Only single question** in the entire benchmark where all ground-truth source documents existed in the vector store. |
 
-#### 4. The Parametric Memory Illusion (Why Models Still Answered Correctly)
-Despite retrieval returning `"wrong"` on 18 questions, `gemma3:4b` achieved **48.08%** correctness and `codellama:7b` achieved **40.90%**.
-- **Explanation:** The LLMs utilized **pre-trained parametric memory** rather than RAG grounding. Common RESTful conventions (e.g. `POST /orders`, `charge_id`, `Idempotency-Key`) allowed instructed models to generate plausible and partially correct answers even when the RAG context injected unrelated documents (such as `stripe_full_openapi.yaml` or `example_api.yaml`).
+#### 4. The Parametric Memory Illusion (Why Models Answered Pre-Fix)
+Prior to fixing the vector store sync, models achieved ~40–48% correctness despite receiving irrelevant context chunks (such as `stripe_full_openapi.yaml` on order questions).
+- **Explanation:** The LLMs fell back to **pre-trained parametric weights** rather than RAG grounding. Standard REST conventions (e.g. `POST /orders`, `charge_id`, `Idempotency-Key`) allowed instructed models to generate plausible-sounding answers from general memory even when the RAG context was completely irrelevant.
 - **Key Takeaway:** End-to-end evaluation without inspecting retrieval metadata creates a dangerous illusion of system health. An unmonitored RAG system can appear functional purely because the underlying foundation model compensates for a broken retrieval pipeline.
+
+#### 5. Before vs. After Grounding: The Quantitative RAG Transformation
+
+Once the synchronization defect was resolved and all 21 files (83 semantic chunks) were loaded into ChromaDB, the quantitative impact of true RAG grounding became undeniable:
+
+| Evaluation Metric | Initial Run (24 Chunks Ingested) | Grounded Run (83 Chunks Ingested) | Net Impact & Delta |
+| :--- | :---: | :---: | :---: |
+| **Retriever "Wrong" Rate** | 69.2% (18/26 questions) | **0.0% (0/26 questions)** | **-69.2% (Defect Eliminated)** |
+| **Retriever "Correct" Rate** | 3.8% (1/26 questions) | **73.1% (19/26 questions)** | **+69.3% Leap** |
+| **Trace Relevance Rate** | 20.0% (3/15 relevant) | **100.0% (15/15 relevant)** | **+80.0% Grounded Context** |
+| **`gemma3:4b` Correctness** | 48.08% | **71.15%** | **+23.07% Quality Lift** |
+| **`codellama:7b` Correctness**| 40.90% | **45.83%** | **+4.93% (1 Hallucination)**|
+| **`starcoder2:3b` Correctness**| 9.62% | **32.12%** | **+22.50% Quality Lift** |
 
 ---
 
@@ -260,30 +272,31 @@ To test retriever discrimination, `billing_glossary.md` was introduced as a hard
 
 ---
 
-### 5.4 End-to-End Execution Trace Case Studies
+### 5.4 End-to-End Execution Trace Case Studies (Post-Grounding Run: `f2cd6546`)
 
-#### Trace Case Study 1: Missing Document Retrieval Failure (`Q12` — API Gateway Routing)
+#### Trace Case Study 1: Resolved Missing Document Failure (`Q12` — API Gateway Routing)
 - **Question:** *Which internal services are NOT routed through the API Gateway, and why?*
 - **Expected Sources:** `api_gateway_routing.md`, `github_webhooks_api.yaml`, `zendesk_tickets_api.yaml`
-- **ChromaDB Reality:** None of the 3 expected files were present in the vector store.
-- **Retrieved Context Injected:** `stripe_full_openapi.yaml`, `example_api.yaml`, `sendgrid_swagger_2.json` (completely irrelevant).
-- **Model Output (`gemma3:4b`):** Attempted to extrapolate from question phrasing; stated that webhook endpoints often bypass gateways for latency reasons, but lacked specific service names (`alerting-service`, `zendesk-webhook-listener`).
-- **Outcome:** **Retrieval: WRONG | Retrieval Outcome: HALLUCINATED / SPECULATIVE.**
+- **ChromaDB Reality:** All 3 files present in ChromaDB.
+- **Retrieved Context Injected:** `api_gateway_routing.md` (`## Routing Rules`, `## Direct Service-to-Service Exclusions`), `api_error_codes.md`.
+- **Model Output (`gemma3:4b`):** Directly cited internal routing rules from `api_gateway_routing.md`, identifying that internal services bypass the gateway to minimize hop latency and prevent circular dependency loops.
+- **Outcome:** **Retrieval: PARTIAL/RELEVANT | Correctness Score: 0.80 (Up from 0.0).**
 
-#### Trace Case Study 2: Grounded Multi-Spec Retrieval (`Q3` — Slack Bot Authentication)
-- **Question:** *What scopes are required to post a message to a public channel in the Slack API?*
-- **Expected Sources:** `slack_dev_guide.md`, `slack_v1.yaml`
-- **ChromaDB Reality:** Both files were indexed in ChromaDB.
-- **Retrieved Context Injected:** `slack_v1.yaml` (`POST /chat.postMessage`), `slack_dev_guide.md` (`## Bot Scopes and Permissions`).
-- **Model Output (`gemma3:4b`):** Correctly asserted `chat:write`, `channels:read`, and required bot token format `xoxb-`.
+#### Trace Case Study 2: Grounded Multi-Spec Retrieval (`Q8` — Order Refund Bridging)
+- **Question:** *What is the exact Stripe endpoint called when a customer requests a refund through the Order Management API?*
+- **Expected Sources:** `order_management_api.yaml`, `checkout_architecture_guide.md`
+- **ChromaDB Reality:** Both files present in ChromaDB.
+- **Retrieved Context Injected:** `checkout_architecture_guide.md` (`## Step 3: Trigger Refund`), `order_management_api.yaml` (`POST /orders/{order_id}/refund`).
+- **Model Output (`codellama:7b`):** Correctly identified that `POST /orders/{order_id}/refund` triggers Stripe's `POST /v1/refunds` and requires the `charge_id`.
 - **Outcome:** **Retrieval: CORRECT | Grounding: 100% | Correctness Score: 1.0.**
 
-#### Trace Case Study 3: Code Synthesis Under Partial Context (`Q24` — Order Placement)
+#### Trace Case Study 3: Fully Grounded Code Synthesis (`Q24` — Order Placement Requests Snippet)
 - **Question:** *Write a Python requests snippet to place a new order via POST /orders with all required fields.*
 - **Expected Sources:** `order_management_api.yaml`
-- **Retrieved Context Injected:** `payments_v2.yaml`, `stripe_v1.yaml` (Missing `order_management_api.yaml`).
-- **Model Output (`codellama:7b`):** Synthesized valid Python `requests.post("https://api.example.com/orders", json={...})` with standard fields (`customer_id`, `items`, `total`).
-- **Outcome:** **Code Pass: 1.0 (Valid Syntax) | Factual Spec Fidelity: Partial (Inferred from prompt rather than spec context).**
+- **ChromaDB Reality:** `order_management_api.yaml` ranked #1 in Cross-Encoder.
+- **Retrieved Context Injected:** `order_management_api.yaml` with exact schema properties (`order_id`, `customer_id`, `items`, `total_amount`).
+- **Model Output (`gemma3:4b`):** Generated fully runnable Python code with exact payload parameters matching the specification.
+- **Outcome:** **Code Pass: 1.0 (Passed Syntax AST & Execution Assertions) | Correctness Score: 1.0.**
 
 ---
 
@@ -303,13 +316,13 @@ graph TD
     end
 ```
 
-| Question | Tested Multi-File Dependency Chain | Expected Sources | Sources in DB | Retriever Chain Complete? | Model Synthesis Ability |
+| Question | Tested Multi-File Dependency Chain | Expected Sources | Sources in DB | Retriever Chain Coverage | Model Synthesis Ability |
 | :--- | :--- | :---: | :---: | :---: | :--- |
-| **Q15** | Push $\rightarrow$ CI $\rightarrow$ Alert $\rightarrow$ Workflow $\rightarrow$ Slack | 5 sources | 1 (`slack_v1.yaml`) | Broken (4 intermediate files missing) | **Moderate** (`gemma3:4b` stitched flow from parametric reasoning) |
-| **Q16** | Failed deploy notification & auth matrix | 3 sources | 0 in DB | Broken (All 3 missing) | **Moderate** (`codellama:7b` inferred Bearer vs Basic auth) |
-| **Q17** | Zendesk ticket $\rightarrow$ Stripe refund $\rightarrow$ SendGrid receipt | 4 sources | 2 in DB | Partial (Stripe & SendGrid present) | **High** (Synthesized 4-step refund flow accurately) |
-| **Q18** | Removing `Idempotency-Key` cross-system impact | 4 sources | 0 in DB | Broken (All 4 missing) | **High** (Correctly warned of duplicate Stripe charges) |
-| **Q19** | `critical` vs `warning` alert dispatch rules | 4 sources | 2 in DB | Partial (Twilio & Slack present) | **High** (100% correct Twilio SMS vs Slack channel routing) |
+| **Q15** | Push $\rightarrow$ CI $\rightarrow$ Alert $\rightarrow$ Workflow $\rightarrow$ Slack | 5 sources | **5 / 5 in DB** | Partial (Top 3 hops captured in Top-5) | **High** (`gemma3:4b` synthesized full flow with 0.75 score) |
+| **Q16** | Failed deploy notification & auth matrix | 3 sources | **3 / 3 in DB** | Partial (CI/CD guide & Alerting present) | **High** (`codellama:7b` identified Bearer & Basic auth) |
+| **Q17** | Zendesk ticket $\rightarrow$ Stripe refund $\rightarrow$ SendGrid receipt | 4 sources | **4 / 4 in DB** | Partial (Zendesk & Workflow present) | **High** (Synthesized 4-step refund flow accurately) |
+| **Q18** | Removing `Idempotency-Key` cross-system impact | 4 sources | **4 / 4 in DB** | **Complete** (Order API & Checkout Guide) | **High** (Correctly warned of duplicate Stripe charges) |
+| **Q19** | `critical` vs `warning` alert dispatch rules | 4 sources | **4 / 4 in DB** | **Complete** (Alerting API & Workflow) | **High** (100% correct Twilio SMS vs Slack channel routing) |
 
 ### 6.2 The Vector RAG Bottleneck vs Repository Code Intelligence
 
