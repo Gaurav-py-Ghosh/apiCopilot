@@ -22,6 +22,7 @@ from .questions import QUESTION_BANK
 from . import corpus_loader
 from . import storage
 from . import evaluator
+from . import ablation_runner
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -355,3 +356,78 @@ async def generate_evaluation_report(run_id: str):
         "exercise_5": {"trace_count": len(ex5_traces), "traces": ex5_traces},
         "exercise_6": {"multihop_count": len(ex6_multihop), "multihop_evaluations": ex6_multihop}
     }
+
+
+class AblationRunRequest(BaseModel):
+    model: Optional[str] = "gemma3:4b"
+    judge_model: Optional[str] = "qwen2.5:7b"
+
+
+@app.post("/api/evaluate/ablation")
+async def start_ablation_run(req: Optional[AblationRunRequest] = None):
+    """Starts a controlled SCIP vs No-SCIP ablation study."""
+    ablation_id = str(uuid.uuid4())
+    model = req.model if req and req.model else "gemma3:4b"
+    judge_model = req.judge_model if req and req.judge_model else "qwen2.5:7b"
+
+    thread = threading.Thread(
+        target=ablation_runner.run_full_ablation,
+        args=(ablation_id, model, judge_model),
+        daemon=True
+    )
+    thread.start()
+
+    return {
+        "ablation_id": ablation_id,
+        "status": "started",
+        "model": model,
+        "judge_model": judge_model,
+        "message": "Ablation study started in background. Monitor via /api/evaluate/ablation/status/{ablation_id}"
+    }
+
+
+@app.get("/api/evaluate/ablation/status/{ablation_id}")
+async def get_ablation_status(ablation_id: str):
+    """Returns current execution status of an ablation run."""
+    run = storage.get_ablation_run(ablation_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Ablation run ID not found")
+    return run
+
+
+@app.get("/api/evaluate/ablation/report/{ablation_id}")
+async def get_ablation_report_endpoint(ablation_id: str):
+    """Returns the comparative ablation report with deltas."""
+    run = storage.get_ablation_run(ablation_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Ablation run ID not found")
+    if not run.get("report"):
+        return {"status": run.get("status"), "message": "Report not ready yet or run in progress"}
+    return run["report"]
+
+
+@app.get("/api/evaluate/ablation/latest")
+async def get_latest_ablation_report():
+    """Returns the most recent completed ablation report."""
+    runs = storage.list_ablation_runs()
+    for r in runs:
+        full = storage.get_ablation_run(r["id"])
+        if full and full.get("report"):
+            return full["report"]
+    # Fallback to static file if exists
+    import os
+    import json
+    for p in ["D:/AIDeV/ablation_report_scip.json", "D:/AIDeV/frontend/src/app/components/evaluation/ablationReportData.json"]:
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    raise HTTPException(status_code=404, detail="No completed ablation report found")
+
+
+@app.get("/api/evaluate/ablation/runs")
+async def get_all_ablation_runs():
+    return {"runs": storage.list_ablation_runs()}
+

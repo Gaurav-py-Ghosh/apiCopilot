@@ -9,6 +9,7 @@ import { Exercise3Metrics } from './evaluation/Exercise3Metrics';
 import { Exercise4Analysis } from './evaluation/Exercise4Analysis';
 import { Exercise5Traces } from './evaluation/Exercise5Traces';
 import { Exercise6MultiHop } from './evaluation/Exercise6MultiHop';
+import { AblationTab } from './evaluation/AblationTab';
 
 export function EvaluationDashboard() {
   const [activeTab, setActiveTab] = useState<number>(0);
@@ -23,6 +24,7 @@ export function EvaluationDashboard() {
     { id: 4, label: 'Ex 4: Analysis', sub: 'Trade-offs & Router', icon: '⚖️' },
     { id: 5, label: 'Ex 5: Traces', sub: 'RAG Pipeline Flow', icon: '🔍' },
     { id: 6, label: 'Ex 6: Multi-Hop', sub: 'Repository Graph', icon: '🕸️' },
+    { id: 7, label: 'SCIP Ablation', sub: 'Code Intelligence Δ', icon: '⚡' },
   ];
 
   return (
@@ -116,6 +118,7 @@ export function EvaluationDashboard() {
           <Exercise5Traces initialQuestionId={selectedTraceQuestionId} />
         )}
         {activeTab === 6 && <Exercise6MultiHop />}
+        {activeTab === 7 && <AblationTab />}
       </main>
 
       {/* Raw JSON Explorer Modal */}

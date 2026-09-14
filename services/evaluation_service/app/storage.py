@@ -74,10 +74,44 @@ def init_db(db_path: Optional[str] = None):
                 avg_gpu_mem_mb       REAL,
                 peak_gpu_mem_mb      REAL,
 
+                rag_latency_seconds  REAL,
+                context_char_count   INTEGER,
+                scip_chunks_in_top3  INTEGER,
+                ablation_variant     TEXT,
+
                 completed_at         TEXT,
                 error_msg            TEXT
             );
             """)
+
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS ablation_runs (
+                id              TEXT PRIMARY KEY,
+                created_at      TEXT NOT NULL,
+                status          TEXT NOT NULL,
+                model           TEXT NOT NULL,
+                baseline_run_id TEXT,
+                scip_run_id     TEXT,
+                report_json     TEXT,
+                error_msg       TEXT
+            );
+            """)
+
+            # Auto-migrate new ablation columns into existing results table if missing
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(results)")
+            existing_cols = {row["name"] for row in cur.fetchall()}
+            for col, col_type in [
+                ("rag_latency_seconds", "REAL"),
+                ("context_char_count", "INTEGER"),
+                ("scip_chunks_in_top3", "INTEGER"),
+                ("ablation_variant", "TEXT")
+            ]:
+                if col not in existing_cols:
+                    try:
+                        conn.execute(f"ALTER TABLE results ADD COLUMN {col} {col_type}")
+                    except Exception:
+                        pass
 
             conn.execute("""
             CREATE TABLE IF NOT EXISTS retrieved_contexts (
@@ -213,7 +247,9 @@ def save_result(
                     correctness_method, relevance_score, retrieval_quality, hallucination_flag,
                     hallucination_notes, code_test_passed, code_test_notes, avg_cpu_percent,
                     peak_cpu_percent, avg_ram_mb, peak_ram_mb, avg_gpu_util, peak_gpu_util,
-                    avg_gpu_mem_mb, peak_gpu_mem_mb, completed_at, error_msg
+                    avg_gpu_mem_mb, peak_gpu_mem_mb,
+                    rag_latency_seconds, context_char_count, scip_chunks_in_top3, ablation_variant,
+                    completed_at, error_msg
                 ) VALUES (
                     :id, :run_id, :question_id, :model, :question_text, :group_label, :tag,
                     :expected_sources, :expected_keywords, :is_code_question, :exercise_5_candidate,
@@ -222,11 +258,17 @@ def save_result(
                     :correctness_method, :relevance_score, :retrieval_quality, :hallucination_flag,
                     :hallucination_notes, :code_test_passed, :code_test_notes, :avg_cpu_percent,
                     :peak_cpu_percent, :avg_ram_mb, :peak_ram_mb, :avg_gpu_util, :peak_gpu_util,
-                    :avg_gpu_mem_mb, :peak_gpu_mem_mb, :completed_at, :error_msg
+                    :avg_gpu_mem_mb, :peak_gpu_mem_mb,
+                    :rag_latency_seconds, :context_char_count, :scip_chunks_in_top3, :ablation_variant,
+                    :completed_at, :error_msg
                 )
                 """,
                 {
                     **result_data,
+                    "rag_latency_seconds": result_data.get("rag_latency_seconds"),
+                    "context_char_count": result_data.get("context_char_count"),
+                    "scip_chunks_in_top3": result_data.get("scip_chunks_in_top3", 0),
+                    "ablation_variant": result_data.get("ablation_variant"),
                     "expected_sources": json.dumps(result_data.get("expected_sources", [])),
                     "expected_keywords": json.dumps(result_data.get("expected_keywords", []))
                 }
@@ -321,3 +363,84 @@ def get_contexts(run_id: str, db_path: Optional[str] = None) -> List[Dict[str, A
         return contexts
     finally:
         conn.close()
+
+def create_ablation_run(
+    ablation_id: str,
+    model: str,
+    status: str = "running",
+    db_path: Optional[str] = None
+) -> Dict[str, Any]:
+    conn = get_db_connection(db_path)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO ablation_runs (id, created_at, status, model)
+                VALUES (?, ?, ?, ?)
+                """,
+                (ablation_id, now_iso, status, model)
+            )
+        return get_ablation_run(ablation_id, db_path)
+    finally:
+        conn.close()
+
+def update_ablation_run(
+    ablation_id: str,
+    status: str,
+    baseline_run_id: Optional[str] = None,
+    scip_run_id: Optional[str] = None,
+    report_json: Optional[str] = None,
+    error_msg: Optional[str] = None,
+    db_path: Optional[str] = None
+):
+    conn = get_db_connection(db_path)
+    try:
+        with conn:
+            updates = ["status = ?"]
+            params = [status]
+            if baseline_run_id is not None:
+                updates.append("baseline_run_id = ?")
+                params.append(baseline_run_id)
+            if scip_run_id is not None:
+                updates.append("scip_run_id = ?")
+                params.append(scip_run_id)
+            if report_json is not None:
+                updates.append("report_json = ?")
+                params.append(report_json)
+            if error_msg is not None:
+                updates.append("error_msg = ?")
+                params.append(error_msg)
+            params.append(ablation_id)
+            conn.execute(f"UPDATE ablation_runs SET {', '.join(updates)} WHERE id = ?", params)
+    finally:
+        conn.close()
+
+def get_ablation_run(ablation_id: str, db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    conn = get_db_connection(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM ablation_runs WHERE id = ?", (ablation_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        if d.get("report_json"):
+            try:
+                d["report"] = json.loads(d["report_json"])
+            except Exception:
+                d["report"] = None
+        return d
+    finally:
+        conn.close()
+
+def list_ablation_runs(db_path: Optional[str] = None) -> List[Dict[str, Any]]:
+    conn = get_db_connection(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id, created_at, status, model, baseline_run_id, scip_run_id, error_msg FROM ablation_runs ORDER BY created_at DESC")
+        rows = cur.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+

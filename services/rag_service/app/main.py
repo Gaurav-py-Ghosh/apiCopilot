@@ -94,3 +94,19 @@ def get_database():
         }
     except Exception as e:
         return {"error": str(e), "fixed_chunks": [], "semantic_chunks": []}
+
+@app.post("/api/database/clear-scip-chunks")
+def clear_scip_chunks():
+    """Removes all codebase SCIP chunks from ChromaDB and rebuilds BM25."""
+    deleted = engine.clear_scip_chunks()
+    return {
+        "status": "success",
+        "deleted_count": deleted,
+        "remaining_count": engine.collection.count() if engine.collection else 0
+    }
+
+@app.get("/api/database/chunk-stats")
+def get_chunk_stats():
+    """Returns statistics on dataset chunks vs SCIP codebase chunks."""
+    return engine.get_chunk_stats()
+

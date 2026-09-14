@@ -251,3 +251,68 @@ class SearchEngine:
             "cross_encoder": cross_results,
             "candidate_count": len(candidate_pool)
         }
+
+    def clear_scip_chunks(self) -> int:
+        """Deletes all SCIP codebase symbol chunks from ChromaDB and rebuilds BM25 index."""
+        if not self.collection:
+            return 0
+        try:
+            all_docs = self.collection.get()
+            ids = all_docs.get("ids", [])
+            metas = all_docs.get("metadatas", [])
+            
+            scip_ids = []
+            for doc_id, meta in zip(ids, metas):
+                if not meta:
+                    continue
+                c_type = meta.get("chunk_type", "")
+                source = meta.get("source", "")
+                is_scip = (
+                    c_type in ["code_symbol", "code_file"] or
+                    meta.get("language") in ["python", "javascript", "typescript", "go"] or
+                    any(source.startswith(p) for p in ["src/", "backend/", "frontend/"])
+                )
+                if is_scip:
+                    scip_ids.append(doc_id)
+
+            if scip_ids:
+                batch_size = 500
+                for i in range(0, len(scip_ids), batch_size):
+                    self.collection.delete(ids=scip_ids[i:i + batch_size])
+                self.bm25, self.docs_texts, self.docs_metas = self.load_bm25()
+                print(f"RAG Service: Cleared {len(scip_ids)} SCIP chunks. Remaining: {self.collection.count()}")
+
+            return len(scip_ids)
+        except Exception as e:
+            print(f"Error clearing SCIP chunks: {e}")
+            return 0
+
+    def get_chunk_stats(self) -> Dict[str, Any]:
+        """Returns statistics on dataset chunks vs SCIP codebase chunks."""
+        if not self.collection:
+            return {"total": 0, "dataset_chunks": 0, "scip_chunks": 0}
+        try:
+            all_docs = self.collection.get()
+            metas = all_docs.get("metadatas", [])
+            scip_count = 0
+            for meta in metas:
+                if not meta:
+                    continue
+                c_type = meta.get("chunk_type", "")
+                source = meta.get("source", "")
+                if (
+                    c_type in ["code_symbol", "code_file"] or
+                    meta.get("language") in ["python", "javascript", "typescript", "go"] or
+                    any(source.startswith(p) for p in ["src/", "backend/", "frontend/"])
+                ):
+                    scip_count += 1
+            total = len(metas)
+            return {
+                "total": total,
+                "scip_chunks": scip_count,
+                "dataset_chunks": total - scip_count
+            }
+        except Exception as e:
+            print(f"Error getting chunk stats: {e}")
+            return {"total": 0, "dataset_chunks": 0, "scip_chunks": 0}
+
