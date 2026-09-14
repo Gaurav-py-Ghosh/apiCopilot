@@ -13,6 +13,7 @@ import logging
 from .config import RAG_SERVICE_URL, INGESTION_SERVICE_URL, OLLAMA_URL, DEFAULT_MODEL
 from .context_suggester import suggest_context_files
 from .github_workspace import GitHubWorkspaceClient
+from .flow_tracer import FlowTracer, is_flow_query
 
 app = FastAPI(
     title="Archon Copilot Orchestrator Gateway",
@@ -90,6 +91,14 @@ class GitHubForkRequest(BaseModel):
     owner: str
     repo: str
     token: str
+
+class IndexCodebaseRequest(BaseModel):
+    workspace_path: Optional[str] = None
+    is_github: Optional[bool] = False
+    github_owner: Optional[str] = None
+    github_repo: Optional[str] = None
+    github_branch: Optional[str] = "main"
+    github_token: Optional[str] = None
 
 class FileContentRequest(BaseModel):
     path: str
@@ -528,17 +537,71 @@ def get_workspace_knowledge_graph():
     return ACTIVE_KNOWLEDGE_GRAPH
 
 @app.post("/api/workspace/index-codebase")
-async def index_workspace_codebase():
+async def index_workspace_codebase(req: Optional[IndexCodebaseRequest] = None):
     """Extracts SCIP symbols across multi-language files, builds Knowledge Graph, and indexes into RAG."""
     global ACTIVE_WORKSPACE_ROOT, ACTIVE_KNOWLEDGE_GRAPH
     import time
     start_time = time.time()
     
-    files = collect_workspace_code_files(ACTIVE_WORKSPACE_ROOT, max_files=150)
+    files: List[Dict[str, str]] = []
+    project_label = "workspace"
+
+    if req and req.is_github and req.github_owner and req.github_repo:
+        project_label = f"{req.github_owner}/{req.github_repo}"
+        client = GitHubWorkspaceClient(token=req.github_token)
+        branch = req.github_branch or "main"
+        
+        try:
+            tree_data = await client.get_tree(req.github_owner, req.github_repo, branch=branch, token=req.github_token)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to fetch GitHub tree: {e}")
+
+        # Flatten tree to find code files
+        candidate_paths: List[str] = []
+        def find_code_files(items: List[Dict[str, Any]], prefix: str = ""):
+            valid_exts = {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".json", ".yaml", ".yml", ".md"}
+            for item in items:
+                name = item.get("name", "")
+                path = item.get("path") or f"{prefix}/{name}".lstrip("/")
+                if item.get("type") in ["dir", "directory"] or item.get("is_dir") or "children" in item:
+                    if name not in IGNORED_DIRS and not name.startswith("."):
+                        find_code_files(item.get("children", []), path)
+                else:
+                    ext = os.path.splitext(name)[1].lower()
+                    if ext in valid_exts and name not in [".DS_Store", "package-lock.json", "tsconfig.tsbuildinfo", "yarn.lock"]:
+                        candidate_paths.append(path)
+
+        find_code_files(tree_data)
+
+        # Fetch contents for up to 100 candidate files concurrently with semaphore
+        sem = asyncio.Semaphore(8)
+        async def fetch_file(fpath: str):
+            async with sem:
+                try:
+                    res = await client.get_file_content(req.github_owner, req.github_repo, fpath, branch=branch, token=req.github_token)
+                    return {"path": fpath, "content": res.get("content", "")}
+                except Exception:
+                    return None
+
+        tasks = [fetch_file(p) for p in candidate_paths[:100]]
+        fetched = await asyncio.gather(*tasks)
+        files = [f for f in fetched if f and f.get("content")]
+
+    else:
+        target_root = ACTIVE_WORKSPACE_ROOT
+        if req and req.workspace_path and req.workspace_path.strip():
+            target_root = normalize_workspace_path(req.workspace_path)
+            if not target_root.exists() or not target_root.is_dir():
+                raise HTTPException(status_code=404, detail=f"Workspace path does not exist: {req.workspace_path}")
+            ACTIVE_WORKSPACE_ROOT = target_root
+
+        project_label = target_root.name
+        files = collect_workspace_code_files(target_root, max_files=150)
+
     if not files:
         return {
             "status": "warning",
-            "message": "No indexable code or documentation files found in workspace.",
+            "message": f"No indexable code or documentation files found in {project_label}.",
             "files_scanned": 0,
             "total_chunks": 0,
             "graph": {"nodes": [], "edges": []}
@@ -561,12 +624,12 @@ async def index_workspace_codebase():
         graph = scip_data.get("graph", {"nodes": [], "edges": []})
         stats = scip_data.get("stats", {})
         
-        # 2. Ingest high-signal chunks into RAG Service
+        # 2. Ingest high-signal chunks into RAG Service (clearing old repo chunks)
         if chunks:
             try:
                 rag_resp = await client.post(
                     f"{RAG_SERVICE_URL}/api/ingest",
-                    json={"chunks": chunks}
+                    json={"chunks": chunks, "clear_existing": True}
                 )
                 if rag_resp.status_code != 200:
                     print(f"Warning: RAG ingestion responded with {rag_resp.status_code}")
@@ -578,12 +641,14 @@ async def index_workspace_codebase():
         "nodes": graph.get("nodes", []),
         "edges": graph.get("edges", []),
         "stats": stats,
-        "project": ACTIVE_WORKSPACE_ROOT.name,
+        "project": project_label,
         "last_indexed": time.strftime("%Y-%m-%d %H:%M:%S")
     }
     try:
         GRAPH_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         GRAPH_CACHE_FILE.write_text(json_module.dumps(ACTIVE_KNOWLEDGE_GRAPH, indent=2), encoding="utf-8")
+        if not (req and req.is_github) and 'target_root' in locals() and target_root.exists():
+            (target_root / "knowledge_graph.json").write_text(json_module.dumps(ACTIVE_KNOWLEDGE_GRAPH, indent=2), encoding="utf-8")
     except Exception as e:
         print(f"Warning: Failed to persist knowledge_graph.json: {e}")
         
@@ -591,7 +656,7 @@ async def index_workspace_codebase():
     
     return {
         "status": "success",
-        "project": ACTIVE_WORKSPACE_ROOT.name,
+        "project": project_label,
         "files_scanned": len(files),
         "endpoints_count": stats.get("endpoints", 0),
         "functions_count": stats.get("functions", 0),
@@ -896,7 +961,30 @@ async def agent_chat(req: AgentChatRequest):
                 if search_resp.status_code == 200:
                     search_data = search_resp.json()
                     cross_results = search_data.get("cross_encoder", [])
-                    valid_chunks = [c for c in cross_results if isinstance(c, dict) and "text" in c and c.get("score") != "N/A"]
+                    raw_chunks = [c for c in cross_results if isinstance(c, dict) and "text" in c and c.get("score") != "N/A"]
+
+                    # Quality Gate: Drop complete irrelevance (score < -10.2) and steep drop-offs (> 2.2 points below top match)
+                    valid_chunks = []
+                    top_score = None
+                    for c in raw_chunks:
+                        raw_score = str(c.get("score", "")).replace("Logit:", "").strip()
+                        try:
+                            s = float(raw_score)
+                        except (ValueError, TypeError):
+                            s = -15.0
+
+                        # Discard complete irrelevance
+                        if s < -10.2:
+                            continue
+
+                        if top_score is None:
+                            top_score = s
+                            valid_chunks.append(c)
+                        else:
+                            # Drop padding chunks that drop drastically below the best match
+                            if (top_score - s) <= 2.2:
+                                valid_chunks.append(c)
+
                     if valid_chunks:
                         context_chunks = []
                         for rank, c in enumerate(valid_chunks, 1):
@@ -928,14 +1016,27 @@ async def agent_chat(req: AgentChatRequest):
         except Exception as e:
             print(f"Warning: Agent RAG retrieval failed: {e}")
 
+    # Flow & Architecture Resolution via Knowledge Graph
+    flow_result = {"is_flow": False, "steps": [], "flow_node_ids": [], "markdown_trace": ""}
+    if latest_user_msg and is_flow_query(latest_user_msg) and ACTIVE_KNOWLEDGE_GRAPH.get("nodes"):
+        try:
+            tracer = FlowTracer(ACTIVE_KNOWLEDGE_GRAPH)
+            flow_result = tracer.trace_flow(latest_user_msg)
+        except Exception as e:
+            print(f"Warning: FlowTracer execution error: {e}")
+
     system_prompt = """You are Archon Agent, an elite AI pair programmer and software architect embedded directly into the developer's IDE.
 You write clean, modular, production-ready code with rigorous adherence to best practices.
 
 ### PAIR PROGRAMMING & CODE GENERATION RULES:
-1. If the user is greeting you (e.g. 'hi', 'hello', 'hey'), respond concisely and warmly asking what task or code they want to work on. DO NOT generate code for simple greetings.
+1. GREETINGS & ARCHITECTURAL / FLOW QUESTIONS:
+   - If the user is greeting you (e.g. 'hi', 'hello', 'hey'), respond concisely and warmly asking what task or code they want to work on. DO NOT generate code for simple greetings.
+   - If the user is asking an ARCHITECTURAL, INFORMATIONAL, or EXECUTION-FLOW question (e.g. "how do we...", "where is...", "how does...", "what happens when..."):
+     - Respond directly in structured, professional markdown with clear numbered steps and bullet points.
+     - DO NOT wrap conversational explanations inside a fictional script or python dictionary (e.g. do NOT create files like `describe_flow.py`).
 
-2. NEW OR EMPTY FILES (CRITICAL):
-   - If the active editor file is EMPTY or BLANK (or has no existing code to modify), OR if you are writing code for a new file/task:
+2. NEW OR EMPTY FILES (FOR CODING TASKS ONLY):
+   - ONLY when the user explicitly asks to implement, write, or generate a new file or feature, and the active editor file is EMPTY or BLANK:
    - NEVER use SEARCH/REPLACE diff blocks.
    - ALWAYS output the complete implementation inside standard fenced markdown (```python, ```typescript, etc.) and include `# filename: <filename>` at the top of the block.
    ```python
@@ -966,7 +1067,25 @@ You write clean, modular, production-ready code with rigorous adherence to best 
 5. CODE QUALITY:
    - Maintain correct imports, type annotations, and robust error handling.
    - Use the retrieved API Documentation Context and Active Editor File context below to provide 100% accurate, production-ready code.
+
+6. ARCHITECTURAL & EXECUTION-FLOW QUERIES (CRITICAL):
+   - When the user asks "how do we...", "where is...", "what happens when...", or asks about the architecture or execution flow of an action (e.g. sending certificates, processing checkout, ticket triage, notifications):
+   - Check the "Retrieved Enterprise Documentation" and "Discovered Codebase Architecture Flow" below.
+   - If an architectural README or runtime guide is in the retrieved context (e.g. a "Runtime Flow" section in a module README): Synthesize and clearly explain that exact documented runtime flow step-by-step.
+   - Ground your 4-stage execution breakdown STRICTLY in the real files discovered in the flow trace:
+     - 01. UI Trigger & Button: Exact component file (<component_file>:<line>), action name, and onClick event.
+     - 02. Client Request & API Route: Exact HTTP Method, route (<api_route>), and request body parameters.
+     - 03. Backend Controller & Handler: Exact file path and handler function name (<handler_file>:<line>).
+     - 04. Downstream Service: Exact dispatch service (<service_file>:<line>).
+   - STRICTLY FORBIDDEN:
+     - NEVER wrap your explanation inside a python script, function, or dictionary code block (e.g. do NOT output ```python ... ``` for architecture explanations).
+     - NEVER invent fictional file paths (e.g. NEVER invent "routers/certificates.py" or "send_certificate.ts") or imaginary endpoints.
+     - NEVER output placeholder comments like "// In a real application, you would use an email library like Nodemailer" or "// replace with actual logic".
+     - If a file, route, or UI button does not exist in the codebase or retrieved context, explicitly state: "No existing implementation found in the repository."
 """
+
+    if flow_result.get("markdown_trace"):
+        system_prompt += f"\n\n{flow_result['markdown_trace']}\n"
 
     if rag_context:
         system_prompt += f"\n\n### Retrieved Enterprise API Documentation (via Hybrid RAG):\n```\n{rag_context}\n```\n"
@@ -1010,6 +1129,10 @@ You write clean, modular, production-ready code with rigorous adherence to best 
         # First emit RAG sources metadata if available
         if rag_sources_list:
             yield f"data: {json_module.dumps({'rag_sources': rag_sources_list})}\n\n"
+
+        # Emit Flow sequence if available for neural visualizer
+        if flow_result.get("flow_node_ids"):
+            yield f"data: {json_module.dumps({'flow_sequence': flow_result['flow_node_ids'], 'flow_steps': flow_result['steps']})}\n\n"
 
         # Determine if the model is a cloud model or local Ollama model
         cloud_provider = None

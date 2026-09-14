@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { EvaluationDashboard } from './components/EvaluationDashboard';
-import CodeKnowledgeGraph, { KnowledgeGraphData } from './components/CodeKnowledgeGraph';
+import CodeKnowledgeGraph, { KnowledgeGraphData, FlowStep } from './components/CodeKnowledgeGraph';
 import SourcegraphIndexDrawer from './components/SourcegraphIndexDrawer';
 import ContextFileChips, { ContextFileItem, SuggestedFileItem } from './components/ContextFileChips';
 import GitHubOpenModal, { GitHubRepoInfo } from './components/GitHubOpenModal';
@@ -1004,6 +1004,8 @@ interface AgentMessage {
   content: string;
   rag_sources?: RAGSource[];
   status?: string;
+  flowSequence?: string[];
+  flowSteps?: FlowStep[];
 }
 
 /* -- VS Code Style Archon Agent IDE Workspace ---------------- */
@@ -1030,6 +1032,8 @@ function VSCodeAgentIDE({
   const [showIndexDrawer, setShowIndexDrawer] = useState(false);
   const [showKnowledgeGraph, setShowKnowledgeGraph] = useState(false);
   const [knowledgeGraphData, setKnowledgeGraphData] = useState<KnowledgeGraphData | null>(null);
+  const [activeFlowSequence, setActiveFlowSequence] = useState<string[] | null>(null);
+  const [activeFlowSteps, setActiveFlowSteps] = useState<FlowStep[] | null>(null);
   
   // Remote Clone-Free GitHub Workspace State
   const [showGitHubModal, setShowGitHubModal] = useState(false);
@@ -1146,8 +1150,8 @@ function VSCodeAgentIDE({
     const trimmed = agentInput.trim();
     const words = trimmed.split(/\s+/).filter(Boolean);
 
-    // Fire after 3+ words AND 1.5s pause
-    if (words.length < 3) {
+    // Fire after 1+ words with at least 3 chars AND 1.5s pause
+    if (words.length < 1 || trimmed.length < 3) {
       setSuggestedFiles([]);
       return;
     }
@@ -2051,6 +2055,15 @@ function VSCodeAgentIDE({
                   } : m));
                 }
 
+                // Synaptic Flow Trace event
+                if (data.flow_sequence && data.flow_steps) {
+                  setAgentMessages(prev => prev.map(m => m.id === assistantMsgId ? {
+                    ...m,
+                    flowSequence: data.flow_sequence,
+                    flowSteps: data.flow_steps,
+                  } : m));
+                }
+
                 // Token streaming
                 if (data.token) {
                   streamedResponse += data.token;
@@ -2879,6 +2892,41 @@ function VSCodeAgentIDE({
                   </div>
                 )}
 
+                {/* ── Synaptic Architecture Flow Trace ──────────────── */}
+                {msg.flowSequence && msg.flowSequence.length > 0 && (
+                  <div className="mb-3 p-2.5 bg-[#090b0e] border border-[#f59e0b]/30 rounded-lg flex items-center justify-between gap-3 shadow-sm">
+                    <div className="flex items-center gap-2">
+                      <span className="flex h-2 w-2 relative">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#f59e0b] opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-[#f59e0b]"></span>
+                      </span>
+                      <span className="text-[11px] font-mono text-[#cbd5e1]">
+                        Synaptic Path Traced: <strong className="text-[#f59e0b]">{msg.flowSequence.length} nodes</strong> across architecture
+                      </span>
+                    </div>
+                    <button
+                      onClick={async () => {
+                        if (!knowledgeGraphData) {
+                          try {
+                            const r = await fetch(`${apiBase}/api/workspace/graph`);
+                            if (r.ok) {
+                              const d = await r.json();
+                              setKnowledgeGraphData(d);
+                            }
+                          } catch (e) {}
+                        }
+                        setActiveFlowSequence(msg.flowSequence || null);
+                        setActiveFlowSteps(msg.flowSteps || null);
+                        setShowKnowledgeGraph(true);
+                      }}
+                      className="px-2.5 py-1 rounded bg-[#f59e0b]/15 hover:bg-[#f59e0b]/25 border border-[#f59e0b]/35 hover:border-[#f59e0b]/60 text-[#fbbf24] text-[11px] font-mono font-medium flex items-center gap-1.5 transition-all shadow-sm cursor-pointer"
+                    >
+                      <span>⚡ Trace Synaptic Path in Graph</span>
+                      <span>→</span>
+                    </button>
+                  </div>
+                )}
+
                 {msg.content ? (
                   <FormattedMarkdown
                     content={msg.content}
@@ -3407,6 +3455,11 @@ function VSCodeAgentIDE({
         onClose={() => setShowIndexDrawer(false)}
         projectName={currentProjectName}
         apiBase={apiBase}
+        workspacePath={currentProjectPath}
+        isGitHubWorkspace={isGitHubWorkspace}
+        githubRepoInfo={githubRepoInfo}
+        githubToken={githubToken}
+        currentGitHubBranch={currentGitHubBranch}
         onIndexingComplete={(data) => {
           setKnowledgeGraphData(data);
         }}
@@ -3417,10 +3470,16 @@ function VSCodeAgentIDE({
       {showKnowledgeGraph && (
         <CodeKnowledgeGraph
           graphData={knowledgeGraphData}
-          onClose={() => setShowKnowledgeGraph(false)}
+          onClose={() => {
+            setShowKnowledgeGraph(false);
+            setActiveFlowSequence(null);
+            setActiveFlowSteps(null);
+          }}
           onOpenFile={(path) => {
             handleOpenFile(path);
           }}
+          activeFlowSequence={activeFlowSequence}
+          activeFlowSteps={activeFlowSteps}
         />
       )}
 

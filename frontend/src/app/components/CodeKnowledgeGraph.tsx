@@ -44,11 +44,24 @@ export interface KnowledgeGraphData {
   last_indexed?: string;
 }
 
+export interface FlowStep {
+  step: number;
+  node_id: string;
+  stage: string;
+  kind: string;
+  label: string;
+  file_path: string;
+  line_start?: number;
+  detail?: string;
+}
+
 interface Props {
   graphData: KnowledgeGraphData | null;
   onClose: () => void;
   onOpenFile?: (path: string, line?: number) => void;
   onTestQuery?: (query: string) => void;
+  activeFlowSequence?: string[] | null;
+  activeFlowSteps?: FlowStep[] | null;
 }
 
 const KIND_COLORS: Record<string, { fill: string; glow: string; label: string; icon: string }> = {
@@ -59,7 +72,14 @@ const KIND_COLORS: Record<string, { fill: string; glow: string; label: string; i
   variable: { fill: '#a855f7', glow: 'rgba(168, 85, 247, 0.35)', label: 'Config / Var', icon: '📦' }
 };
 
-export default function CodeKnowledgeGraph({ graphData, onClose, onOpenFile, onTestQuery }: Props) {
+export default function CodeKnowledgeGraph({
+  graphData,
+  onClose,
+  onOpenFile,
+  onTestQuery,
+  activeFlowSequence,
+  activeFlowSteps
+}: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -72,6 +92,18 @@ export default function CodeKnowledgeGraph({ graphData, onClose, onOpenFile, onT
   });
   const [isPhysicsActive, setIsPhysicsActive] = useState(true);
 
+  // Neural Flow Cascade State
+  const [flowSequence, setFlowSequence] = useState<string[]>(activeFlowSequence || []);
+  const [flowSteps, setFlowSteps] = useState<FlowStep[]>(activeFlowSteps || []);
+  const [activeStepIdx, setActiveStepIdx] = useState<number>(0);
+  const [isFlowPlaying, setIsFlowPlaying] = useState<boolean>(Boolean(activeFlowSequence && activeFlowSequence.length > 0));
+  const packetProgressRef = useRef<number>(0);
+
+  // Hover tooltip & cursor inspection state
+  const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
+  const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
+  const hoveredNodeRef = useRef<GraphNode | null>(null);
+
   // Camera transform state
   const cameraRef = useRef({ x: 0, y: 0, scale: 0.85 });
   const isDraggingCanvasRef = useRef(false);
@@ -81,26 +113,37 @@ export default function CodeKnowledgeGraph({ graphData, onClose, onOpenFile, onT
   // Particles animation along edges
   const particlesRef = useRef<Array<{ edgeIdx: number; progress: number; speed: number }>>([]);
 
-  // Build simulation nodes and links
-  const { nodes, links, nodeMap } = useMemo(() => {
+  // Build simulation nodes and links with constellation clustering by file
+  const { nodes, links, nodeMap, neighborMap } = useMemo(() => {
     if (!graphData || !graphData.nodes || graphData.nodes.length === 0) {
-      return { nodes: [], links: [], nodeMap: new Map<string, GraphNode>() };
+      return { nodes: [], links: [], nodeMap: new Map<string, GraphNode>(), neighborMap: new Map<string, Set<string>>() };
     }
 
     const nMap = new Map<string, GraphNode>();
     const filteredNodes: GraphNode[] = [];
 
+    // Pre-calculate file constellation centers so symbols group by file
+    const uniqueFiles = Array.from(new Set(graphData.nodes.map(n => n.file_path || 'general')));
+    const fileCenters = new Map<string, { x: number; y: number }>();
+    uniqueFiles.forEach((f, idx) => {
+      const angle = (idx / Math.max(uniqueFiles.length, 1)) * Math.PI * 2;
+      const dist = 220 + (idx % 3) * 110;
+      fileCenters.set(f, { x: Math.cos(angle) * dist, y: Math.sin(angle) * dist });
+    });
+
     // Filter by kind
     for (const n of graphData.nodes) {
       if (filterKinds[n.kind]) {
-        // Initial circular layout around center
-        const angle = Math.random() * Math.PI * 2;
-        const dist = 100 + Math.random() * 350;
-        const r = n.kind === 'endpoint' ? 17 : n.kind === 'class' ? 14 : n.kind === 'function' ? 11 : 8;
+        const center = fileCenters.get(n.file_path || 'general') || { x: 0, y: 0 };
+        const jitterAngle = Math.random() * Math.PI * 2;
+        const jitterDist = 15 + Math.random() * 70;
+
+        // Refined, sleek dot radii (Endpoints 7.5px, Classes 6px, Functions 4.5px, Files 3.5px)
+        const r = n.kind === 'endpoint' ? 7.5 : n.kind === 'class' ? 6 : n.kind === 'function' ? 4.5 : 3.5;
         const simNode: GraphNode = {
           ...n,
-          x: n.x ?? Math.cos(angle) * dist,
-          y: n.y ?? Math.sin(angle) * dist,
+          x: n.x ?? (center.x + Math.cos(jitterAngle) * jitterDist),
+          y: n.y ?? (center.y + Math.sin(jitterAngle) * jitterDist),
           vx: 0,
           vy: 0,
           radius: r,
@@ -111,14 +154,19 @@ export default function CodeKnowledgeGraph({ graphData, onClose, onOpenFile, onT
       }
     }
 
-    // Filter links
+    // Filter links & build neighbor map
     const filteredLinks: Array<{ sourceNode: GraphNode; targetNode: GraphNode; relationship: string }> = [];
+    const nbrMap = new Map<string, Set<string>>();
     if (graphData.edges) {
       for (const e of graphData.edges) {
         const s = nMap.get(e.source);
         const t = nMap.get(e.target);
         if (s && t) {
           filteredLinks.push({ sourceNode: s, targetNode: t, relationship: e.relationship });
+          if (!nbrMap.has(s.id)) nbrMap.set(s.id, new Set());
+          if (!nbrMap.has(t.id)) nbrMap.set(t.id, new Set());
+          nbrMap.get(s.id)!.add(t.id);
+          nbrMap.get(t.id)!.add(s.id);
         }
       }
     }
@@ -130,8 +178,70 @@ export default function CodeKnowledgeGraph({ graphData, onClose, onOpenFile, onT
       speed: 0.006 + Math.random() * 0.008
     }));
 
-    return { nodes: filteredNodes, links: filteredLinks, nodeMap: nMap };
+    return { nodes: filteredNodes, links: filteredLinks, nodeMap: nMap, neighborMap: nbrMap };
   }, [graphData, filterKinds]);
+
+  // Resilient node lookup for flow sequence identifiers
+  const findNodeInFlow = (id: string | null | undefined): GraphNode | undefined => {
+    if (!id) return undefined;
+    if (nodeMap.has(id)) return nodeMap.get(id);
+
+    const cleanId = id.replace(/^(endpoint:|func:|class:|file:)/, '');
+    for (const n of nodes) {
+      if (n.id === id) return n;
+      const nClean = n.id.replace(/^(endpoint:|func:|class:|file:)/, '');
+      if (nClean === cleanId) return n;
+    }
+
+    // Try suffix match or containment e.g. path:symbol
+    for (const n of nodes) {
+      if (id.includes(n.label) || (n.label && id.endsWith(`:${n.label}`))) return n;
+      if (n.file_path && id.includes(n.file_path)) return n;
+    }
+
+    // Match by label
+    const lowerId = id.toLowerCase();
+    for (const n of nodes) {
+      if (n.label && (n.label.toLowerCase() === lowerId || lowerId.includes(n.label.toLowerCase()))) {
+        return n;
+      }
+    }
+
+    return undefined;
+  };
+
+  // Synchronize incoming flow props
+  useEffect(() => {
+    if (activeFlowSequence && activeFlowSequence.length > 0) {
+      setFlowSequence(activeFlowSequence);
+      setFlowSteps(activeFlowSteps || []);
+      setActiveStepIdx(0);
+      setIsFlowPlaying(true);
+      packetProgressRef.current = 0;
+    }
+  }, [activeFlowSequence, activeFlowSteps]);
+
+  // Step progression timer for synaptic activation (calm, professional 2.2s pacing)
+  useEffect(() => {
+    if (!isFlowPlaying || flowSequence.length <= 1) return;
+    const timer = setInterval(() => {
+      setActiveStepIdx(prev => (prev + 1) % flowSequence.length);
+      packetProgressRef.current = 0;
+    }, 2200);
+    return () => clearInterval(timer);
+  }, [isFlowPlaying, flowSequence]);
+
+  // Smoothly center camera on currently firing flow node
+  useEffect(() => {
+    if (flowSequence.length > 0 && activeStepIdx < flowSequence.length) {
+      const activeId = flowSequence[activeStepIdx];
+      const targetNode = findNodeInFlow(activeId);
+      if (targetNode && targetNode.x !== undefined && targetNode.y !== undefined) {
+        cameraRef.current.x = -targetNode.x * cameraRef.current.scale;
+        cameraRef.current.y = -targetNode.y * cameraRef.current.scale;
+      }
+    }
+  }, [activeStepIdx, flowSequence, nodes]);
 
   // Main Canvas Render & Physics Loop
   useEffect(() => {
@@ -154,10 +264,10 @@ export default function CodeKnowledgeGraph({ graphData, onClose, onOpenFile, onT
     const stepPhysics = () => {
       if (!isPhysicsActive || nodes.length === 0) return;
 
-      const repulsion = 900;
-      const springLength = 80;
-      const springK = 0.04;
-      const centerGravity = 0.008;
+      const repulsion = 1800;
+      const springLength = 150;
+      const springK = 0.025;
+      const centerGravity = 0.003;
 
       // 1. Repulsion between all node pairs
       for (let i = 0; i < nodes.length; i++) {
@@ -168,7 +278,7 @@ export default function CodeKnowledgeGraph({ graphData, onClose, onOpenFile, onT
           const dy = (n2.y || 0) - (n1.y || 0);
           const distSq = dx * dx + dy * dy + 100;
           const dist = Math.sqrt(distSq);
-          if (dist < 400) {
+          if (dist < 450) {
             const force = repulsion / distSq;
             const fx = (dx / dist) * force;
             const fy = (dy / dist) * force;
@@ -236,69 +346,230 @@ export default function CodeKnowledgeGraph({ graphData, onClose, onOpenFile, onT
       }
       ctx.stroke();
 
+      const activeNode = hoveredNodeRef.current || selectedNode;
+      const activeNeighbors = activeNode ? neighborMap.get(activeNode.id) : null;
+
+      const isFlowActive = flowSequence.length > 0;
+      const firingId = isFlowActive && activeStepIdx < flowSequence.length ? flowSequence[activeStepIdx] : null;
+      const nextId = isFlowActive && flowSequence.length > 1 ? flowSequence[(activeStepIdx + 1) % flowSequence.length] : null;
+      const firingNode = firingId ? findNodeInFlow(firingId) : null;
+      const nextNode = nextId ? findNodeInFlow(nextId) : null;
+
       // Draw Links
       for (const link of links) {
         const s = link.sourceNode;
         const t = link.targetNode;
         if (!s || !t) continue;
 
-        const isHighlighted = selectedNode && (selectedNode.id === s.id || selectedNode.id === t.id);
+        if (isFlowActive) {
+          ctx.beginPath();
+          ctx.moveTo(s.x || 0, s.y || 0);
+          ctx.lineTo(t.x || 0, t.y || 0);
+          ctx.strokeStyle = 'rgba(100, 116, 139, 0.04)';
+          ctx.lineWidth = 0.6;
+          ctx.stroke();
+          continue;
+        }
+
+        const isHighlighted = activeNode && (activeNode.id === s.id || activeNode.id === t.id);
 
         ctx.beginPath();
         ctx.moveTo(s.x || 0, s.y || 0);
         ctx.lineTo(t.x || 0, t.y || 0);
 
         if (isHighlighted) {
-          ctx.strokeStyle = '#38bdf8';
-          ctx.lineWidth = 2.5;
+          ctx.strokeStyle = KIND_COLORS[activeNode.kind]?.fill || '#38bdf8';
+          ctx.lineWidth = 2.2;
+        } else if (activeNode) {
+          ctx.strokeStyle = 'rgba(100, 116, 139, 0.05)';
+          ctx.lineWidth = 0.6;
         } else if (link.relationship === 'ROUTES_TO') {
-          ctx.strokeStyle = 'rgba(245, 158, 11, 0.35)';
-          ctx.lineWidth = 1.6;
+          ctx.strokeStyle = 'rgba(245, 158, 11, 0.28)';
+          ctx.lineWidth = 1.4;
         } else if (link.relationship === 'CALLS') {
-          ctx.strokeStyle = 'rgba(56, 189, 248, 0.3)';
-          ctx.lineWidth = 1.3;
+          ctx.strokeStyle = 'rgba(56, 189, 248, 0.24)';
+          ctx.lineWidth = 1.1;
         } else {
-          ctx.strokeStyle = 'rgba(100, 116, 139, 0.2)';
-          ctx.lineWidth = 0.9;
+          ctx.strokeStyle = 'rgba(100, 116, 139, 0.12)';
+          ctx.lineWidth = 0.8;
         }
         ctx.stroke();
       }
 
-      // Draw animated particle pulses along links
-      for (const p of particlesRef.current) {
-        if (p.edgeIdx < links.length) {
-          const l = links[p.edgeIdx];
-          p.progress = (p.progress + p.speed) % 1.0;
-          const px = (l.sourceNode.x || 0) + ((l.targetNode.x || 0) - (l.sourceNode.x || 0)) * p.progress;
-          const py = (l.sourceNode.y || 0) + ((l.targetNode.y || 0) - (l.sourceNode.y || 0)) * p.progress;
+      // Draw animated particle pulses along links (when no flow sequence active)
+      if (!isFlowActive) {
+        for (const p of particlesRef.current) {
+          if (p.edgeIdx < links.length) {
+            const l = links[p.edgeIdx];
+            const isLinkActive = activeNode && (activeNode.id === l.sourceNode.id || activeNode.id === l.targetNode.id);
+            if (activeNode && !isLinkActive) continue;
 
+            p.progress = (p.progress + p.speed) % 1.0;
+            const px = (l.sourceNode.x || 0) + ((l.targetNode.x || 0) - (l.sourceNode.x || 0)) * p.progress;
+            const py = (l.sourceNode.y || 0) + ((l.targetNode.y || 0) - (l.sourceNode.y || 0)) * p.progress;
+
+            ctx.beginPath();
+            ctx.arc(px, py, 2.0, 0, Math.PI * 2);
+            ctx.fillStyle = isLinkActive ? '#38bdf8' : '#60a5fa';
+            ctx.shadowColor = '#60a5fa';
+            ctx.shadowBlur = 5;
+            ctx.fill();
+            ctx.shadowBlur = 0;
+          }
+        }
+      }
+
+      // ── Dedicated Synaptic Flow Path Trajectory ─────────────────────
+      if (isFlowActive && flowSequence.length > 0) {
+        // 1. Calm connecting dashed guide path across all consecutive flow nodes
+        for (let i = 0; i < flowSequence.length - 1; i++) {
+          const s = findNodeInFlow(flowSequence[i]);
+          const t = findNodeInFlow(flowSequence[i + 1]);
+          if (!s || !t || s.x === undefined || s.y === undefined || t.x === undefined || t.y === undefined) continue;
+
+          ctx.save();
+          ctx.setLineDash([5, 5]);
+          ctx.strokeStyle = 'rgba(56, 189, 248, 0.35)';
+          ctx.lineWidth = 1.8;
           ctx.beginPath();
-          ctx.arc(px, py, 2.5, 0, Math.PI * 2);
-          ctx.fillStyle = '#60a5fa';
-          ctx.shadowColor = '#60a5fa';
-          ctx.shadowBlur = 6;
+          ctx.moveTo(s.x, s.y);
+          ctx.lineTo(t.x, t.y);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          // Directional indicator arrow at 50% midpoint
+          const midX = (s.x + t.x) / 2;
+          const midY = (s.y + t.y) / 2;
+          const angle = Math.atan2(t.y - s.y, t.x - s.x);
+          const arrowLen = 7;
+          ctx.fillStyle = 'rgba(56, 189, 248, 0.55)';
+          ctx.beginPath();
+          ctx.moveTo(midX + Math.cos(angle) * arrowLen, midY + Math.sin(angle) * arrowLen);
+          ctx.lineTo(midX + Math.cos(angle + (Math.PI * 5) / 6) * arrowLen, midY + Math.sin(angle + (Math.PI * 5) / 6) * arrowLen);
+          ctx.lineTo(midX + Math.cos(angle - (Math.PI * 5) / 6) * arrowLen, midY + Math.sin(angle - (Math.PI * 5) / 6) * arrowLen);
+          ctx.closePath();
           ctx.fill();
-          ctx.shadowBlur = 0;
+          ctx.restore();
+        }
+
+        // 2. Glowing Active Laser Beam between current firing node and next node
+        if (firingNode && nextNode && firingNode.id !== nextNode.id) {
+          const s = firingNode;
+          const t = nextNode;
+          if (s.x !== undefined && s.y !== undefined && t.x !== undefined && t.y !== undefined) {
+            ctx.save();
+            // Outer glow line
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 3.2;
+            ctx.shadowColor = '#38bdf8';
+            ctx.shadowBlur = 12;
+            ctx.beginPath();
+            ctx.moveTo(s.x, s.y);
+            ctx.lineTo(t.x, t.y);
+            ctx.stroke();
+
+            // Inner core laser beam
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 1.2;
+            ctx.stroke();
+
+            // Traveling photon packet
+            packetProgressRef.current = (packetProgressRef.current + 0.018) % 1.0;
+            const px = s.x + (t.x - s.x) * packetProgressRef.current;
+            const py = s.y + (t.y - s.y) * packetProgressRef.current;
+
+            // Photon particle head with glow
+            ctx.beginPath();
+            ctx.arc(px, py, 4.0, 0, Math.PI * 2);
+            ctx.fillStyle = '#ffffff';
+            ctx.shadowColor = '#38bdf8';
+            ctx.shadowBlur = 15;
+            ctx.fill();
+
+            // Destination directional arrowhead pointing towards target perimeter
+            const dx = t.x - s.x;
+            const dy = t.y - s.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist > 25) {
+              const targetRadius = (t.radius || 7.5) * 1.5;
+              const stopX = t.x - (dx / dist) * targetRadius;
+              const stopY = t.y - (dy / dist) * targetRadius;
+              const angle = Math.atan2(dy, dx);
+              const headLen = 10;
+
+              ctx.fillStyle = '#38bdf8';
+              ctx.shadowColor = '#38bdf8';
+              ctx.shadowBlur = 10;
+              ctx.beginPath();
+              ctx.moveTo(stopX, stopY);
+              ctx.lineTo(stopX - headLen * Math.cos(angle - Math.PI / 7), stopY - headLen * Math.sin(angle - Math.PI / 7));
+              ctx.lineTo(stopX - headLen * Math.cos(angle + Math.PI / 7), stopY - headLen * Math.sin(angle + Math.PI / 7));
+              ctx.closePath();
+              ctx.fill();
+            }
+            ctx.restore();
+          }
         }
       }
 
       // Draw Nodes
       for (const n of nodes) {
-        const isSelected = selectedNode?.id === n.id;
+        let inFlow = false;
+        let flowIdx = -1;
+        if (isFlowActive) {
+          for (let i = 0; i < flowSequence.length; i++) {
+            const m = findNodeInFlow(flowSequence[i]);
+            if (m && m.id === n.id) {
+              inFlow = true;
+              flowIdx = i;
+              break;
+            }
+          }
+        }
+        const isFiringNode = firingNode ? firingNode.id === n.id : false;
+        const isActive = activeNode?.id === n.id;
+        const isNeighbor = activeNeighbors ? activeNeighbors.has(n.id) : false;
         const isMatch = searchQuery.trim() && n.label.toLowerCase().includes(searchQuery.toLowerCase());
-        const radius = (n.radius || 10) * (isSelected || isMatch ? 1.3 : 1.0);
+        
+        // Dimming
+        if (isFlowActive) {
+          if (!inFlow) {
+            ctx.globalAlpha = 0.12;
+          } else {
+            ctx.globalAlpha = 1.0;
+          }
+        } else if (activeNode && !isActive && !isNeighbor && !isMatch) {
+          ctx.globalAlpha = 0.2;
+        } else {
+          ctx.globalAlpha = 1.0;
+        }
+
+        const radius = (n.radius || 5) * (isFiringNode ? 1.8 : inFlow ? 1.4 : isActive || isMatch ? 1.6 : isNeighbor ? 1.25 : 1.0);
         const color = KIND_COLORS[n.kind]?.fill || '#94a3b8';
         const glowColor = KIND_COLORS[n.kind]?.glow || 'rgba(255,255,255,0.2)';
 
         ctx.save();
+
+        // Soft ambient halo around firing node (Linear / Vercel style)
+        if (isFiringNode) {
+          ctx.beginPath();
+          ctx.arc(n.x || 0, n.y || 0, radius + 5, 0, Math.PI * 2);
+          ctx.strokeStyle = 'rgba(56, 189, 248, 0.45)';
+          ctx.lineWidth = 1.5;
+          ctx.shadowColor = '#38bdf8';
+          ctx.shadowBlur = 12;
+          ctx.stroke();
+          ctx.shadowBlur = 0;
+        }
+
         ctx.beginPath();
         ctx.arc(n.x || 0, n.y || 0, radius, 0, Math.PI * 2);
 
         // Glow
-        if (isSelected || isMatch) {
+        if (isFiringNode || isActive || isMatch) {
           ctx.shadowColor = color;
-          ctx.shadowBlur = 18;
-        } else {
+          ctx.shadowBlur = 16;
+        } else if (inFlow || isNeighbor) {
           ctx.shadowColor = glowColor;
           ctx.shadowBlur = 8;
         }
@@ -308,18 +579,65 @@ export default function CodeKnowledgeGraph({ graphData, onClose, onOpenFile, onT
         ctx.shadowBlur = 0;
 
         // Border ring
-        ctx.lineWidth = isSelected ? 3 : 1.5;
-        ctx.strokeStyle = isSelected ? '#ffffff' : 'rgba(255, 255, 255, 0.6)';
+        ctx.lineWidth = isFiringNode ? 3 : inFlow || isActive ? 2 : 1.0;
+        ctx.strokeStyle = isFiringNode ? '#ffffff' : inFlow ? color : 'rgba(255, 255, 255, 0.4)';
         ctx.stroke();
 
-        // Node Label
-        ctx.font = isSelected ? 'bold 11px Inter, sans-serif' : '10px Inter, sans-serif';
-        ctx.fillStyle = isSelected ? '#ffffff' : '#cbd5e1';
-        ctx.textAlign = 'center';
-        ctx.fillText(n.label, n.x || 0, (n.y || 0) + radius + 13);
+        // Step Badge (01, 02, 03) if in flow
+        if (inFlow && flowIdx >= 0) {
+          const badgeText = `0${flowIdx + 1}`;
+          ctx.font = 'bold 9px JetBrains Mono, Inter, monospace';
+          const bMetrics = ctx.measureText(badgeText);
+          const bx = n.x || 0;
+          const by = (n.y || 0) - radius - 10;
+
+          // Badge pill
+          ctx.fillStyle = isFiringNode ? 'rgba(6, 182, 212, 0.95)' : 'rgba(15, 23, 42, 0.9)';
+          ctx.beginPath();
+          if ((ctx as any).roundRect) {
+            (ctx as any).roundRect(bx - bMetrics.width / 2 - 4, by - 8, bMetrics.width + 8, 11, 2);
+          } else {
+            ctx.rect(bx - bMetrics.width / 2 - 4, by - 8, bMetrics.width + 8, 11);
+          }
+          ctx.fill();
+          ctx.strokeStyle = isFiringNode ? '#ffffff' : 'rgba(100, 116, 139, 0.5)';
+          ctx.lineWidth = 0.8;
+          ctx.stroke();
+
+          ctx.fillStyle = isFiringNode ? '#041d2e' : '#e2e8f0';
+          ctx.textAlign = 'center';
+          ctx.fillText(badgeText, bx, by);
+        }
+
+        // Node Label - selectively shown on hover, select, search, flow, or close zoom
+        const shouldShowLabel = inFlow || isFiringNode || isActive || isNeighbor || isMatch || (cameraRef.current.scale >= 1.6 && (n.kind === 'endpoint' || n.kind === 'class'));
+        if (shouldShowLabel) {
+          ctx.font = isFiringNode || inFlow ? 'bold 10.5px Inter, sans-serif' : isActive ? 'bold 11px Inter, sans-serif' : '10px Inter, sans-serif';
+          const textX = n.x || 0;
+          const textY = (n.y || 0) + radius + 13;
+          const textMetrics = ctx.measureText(n.label);
+          const bgWidth = textMetrics.width + 10;
+          const bgHeight = 15;
+
+          // Draw pill background
+          ctx.fillStyle = 'rgba(11, 14, 20, 0.88)';
+          if ((ctx as any).roundRect) {
+            ctx.beginPath();
+            (ctx as any).roundRect(textX - bgWidth / 2, textY - 11, bgWidth, bgHeight, 3);
+            ctx.fill();
+            ctx.strokeStyle = isFiringNode ? '#38bdf8' : inFlow ? color : isActive ? color : 'rgba(255, 255, 255, 0.15)';
+            ctx.lineWidth = 0.8;
+            ctx.stroke();
+          }
+
+          ctx.fillStyle = isFiringNode ? '#ffffff' : inFlow ? '#38bdf8' : isActive ? '#ffffff' : isNeighbor ? '#f1f5f9' : '#cbd5e1';
+          ctx.textAlign = 'center';
+          ctx.fillText(n.label, textX, textY);
+        }
 
         ctx.restore();
       }
+      ctx.globalAlpha = 1.0;
 
       ctx.restore();
       animId = requestAnimationFrame(draw);
@@ -331,7 +649,7 @@ export default function CodeKnowledgeGraph({ graphData, onClose, onOpenFile, onT
       window.removeEventListener('resize', handleResize);
       cancelAnimationFrame(animId);
     };
-  }, [nodes, links, selectedNode, searchQuery, isPhysicsActive]);
+  }, [nodes, links, selectedNode, searchQuery, isPhysicsActive, neighborMap]);
 
   // Screen coordinate to world transform
   const screenToWorld = (sx: number, sy: number) => {
@@ -356,7 +674,7 @@ export default function CodeKnowledgeGraph({ graphData, onClose, onOpenFile, onT
       const n = nodes[i];
       const dx = (n.x || 0) - w.x;
       const dy = (n.y || 0) - w.y;
-      if (Math.sqrt(dx * dx + dy * dy) <= (n.radius || 10) + 5) {
+      if (Math.sqrt(dx * dx + dy * dy) <= (n.radius || 6) + 8) {
         clicked = n;
         break;
       }
@@ -384,7 +702,33 @@ export default function CodeKnowledgeGraph({ graphData, onClose, onOpenFile, onT
       cameraRef.current.x += dx;
       cameraRef.current.y += dy;
       dragStartRef.current = { x: e.clientX, y: e.clientY };
+    } else {
+      // Hover detection
+      const w = screenToWorld(e.clientX, e.clientY);
+      let found: GraphNode | null = null;
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const n = nodes[i];
+        const dx = (n.x || 0) - w.x;
+        const dy = (n.y || 0) - w.y;
+        const hitRadius = (n.radius || 5) + 8;
+        if (dx * dx + dy * dy <= hitRadius * hitRadius) {
+          found = n;
+          break;
+        }
+      }
+      hoveredNodeRef.current = found;
+      setHoveredNode(found);
+      if (found) {
+        setHoverPos({ x: e.clientX, y: e.clientY });
+      }
     }
+  };
+
+  const handleMouseLeave = () => {
+    draggedNodeRef.current = null;
+    isDraggingCanvasRef.current = false;
+    hoveredNodeRef.current = null;
+    setHoveredNode(null);
   };
 
   const handleMouseUp = () => {
@@ -512,14 +856,134 @@ export default function CodeKnowledgeGraph({ graphData, onClose, onOpenFile, onT
 
       {/* ── Main Canvas Viewport ──────────────────────────────────────── */}
       <div className="flex-1 relative overflow-hidden bg-[#07080a]">
+        {/* Sleek Minimalist Flow Stepper Bar (Linear / Vercel style) */}
+        {flowSequence.length > 0 && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 px-3.5 py-1.5 rounded-xl bg-[#0b0e14]/95 border border-[#1e2638] shadow-2xl backdrop-blur-xl flex items-center gap-2.5 text-xs font-mono select-none animate-in fade-in-50 slide-in-from-top-2 duration-200">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-1">
+                <span>⚡ Flow:</span>
+              </span>
+              <div className="flex items-center gap-1.5">
+                {flowSequence.map((id, idx) => {
+                  const stepInfo = flowSteps.find(s => s.node_id === id);
+                  const isCurrent = idx === activeStepIdx;
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => { setActiveStepIdx(idx); setIsFlowPlaying(false); }}
+                      className={`px-2 py-0.5 rounded text-[10.5px] transition-all cursor-pointer flex items-center gap-1 border ${
+                        isCurrent
+                          ? 'bg-cyan-950/80 border-cyan-500/80 text-cyan-200 font-bold shadow-[0_0_10px_rgba(6,182,212,0.3)]'
+                          : 'bg-[#141a27] border-slate-700/50 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <span className="text-[9px] opacity-75">0{idx + 1}</span>
+                      <span className="max-w-[100px] truncate">{stepInfo?.label || id.split(':').pop()}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="h-3.5 w-px bg-slate-700/60 mx-1" />
+
+            {/* Play / Pause / Reset Controls */}
+            <button
+              type="button"
+              onClick={() => setIsFlowPlaying(!isFlowPlaying)}
+              className="text-slate-300 hover:text-white p-1 cursor-pointer transition-colors text-xs"
+              title={isFlowPlaying ? "Pause flow playback" : "Resume flow playback"}
+            >
+              {isFlowPlaying ? '⏸' : '▶'}
+            </button>
+            <button
+              type="button"
+              onClick={() => { setActiveStepIdx(0); setIsFlowPlaying(true); }}
+              className="text-slate-400 hover:text-white text-[11px] p-1 cursor-pointer transition-colors"
+              title="Restart flow from Step 01"
+            >
+              ↺
+            </button>
+            <button
+              type="button"
+              onClick={() => { setFlowSequence([]); setFlowSteps([]); }}
+              className="text-slate-500 hover:text-rose-400 text-xs p-1 cursor-pointer transition-colors ml-1"
+              title="Clear flow inspection"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
         <canvas
           ref={canvasRef}
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
+          onMouseLeave={handleMouseLeave}
           onWheel={handleWheel}
-          className="w-full h-full cursor-grab active:cursor-grabbing"
+          className={`w-full h-full ${hoveredNode ? 'cursor-pointer' : 'cursor-grab active:cursor-grabbing'}`}
         />
+
+        {/* Floating Glassmorphic Hover Inspector Card */}
+        {hoveredNode && hoverPos && !selectedNode && (
+          <div
+            className="fixed z-50 pointer-events-none rounded-xl bg-[#0b0e14]/95 border border-[#222c3f] shadow-2xl backdrop-blur-xl p-3 text-xs font-mono max-w-sm transition-opacity duration-150 animate-in fade-in-50"
+            style={{
+              left: `${Math.min(hoverPos.x + 16, typeof window !== 'undefined' ? window.innerWidth - 320 : hoverPos.x + 16)}px`,
+              top: `${Math.min(hoverPos.y + 16, typeof window !== 'undefined' ? window.innerHeight - 220 : hoverPos.y + 16)}px`
+            }}
+          >
+            <div className="flex items-center justify-between gap-2 mb-1.5 pb-1.5 border-b border-[#1b2332]">
+              <span
+                className="px-2 py-0.5 rounded text-[9.5px] font-bold uppercase tracking-wider flex items-center gap-1"
+                style={{
+                  backgroundColor: `${KIND_COLORS[hoveredNode.kind]?.fill}20`,
+                  color: KIND_COLORS[hoveredNode.kind]?.fill,
+                  border: `1px solid ${KIND_COLORS[hoveredNode.kind]?.fill}40`
+                }}
+              >
+                <span>{KIND_COLORS[hoveredNode.kind]?.icon}</span>
+                <span>{KIND_COLORS[hoveredNode.kind]?.label}</span>
+              </span>
+              {hoveredNode.language && (
+                <span className="text-[9.5px] text-slate-400 uppercase font-semibold">
+                  {hoveredNode.language}
+                </span>
+              )}
+            </div>
+
+            <div className="font-semibold text-white text-[12px] truncate mb-1">
+              {hoveredNode.label}
+            </div>
+
+            <div className="text-[10px] text-cyan-400 truncate mb-1.5 flex items-center gap-1">
+              <span>📄</span>
+              <span className="truncate">{hoveredNode.file_path}</span>
+              {hoveredNode.line_start && (
+                <span className="text-slate-400 flex-shrink-0">:{hoveredNode.line_start}-{hoveredNode.line_end || '?'}</span>
+              )}
+            </div>
+
+            {hoveredNode.signature && (
+              <div className="text-[10px] text-emerald-300 bg-[#07090e] p-1.5 rounded border border-[#1b2332] truncate mb-1.5 font-mono">
+                {hoveredNode.signature}
+              </div>
+            )}
+
+            {hoveredNode.docstring && (
+              <div className="text-[10.5px] text-slate-300 font-sans line-clamp-2 mb-1.5 bg-[#121622]/60 p-1.5 rounded">
+                {hoveredNode.docstring}
+              </div>
+            )}
+
+            <div className="flex items-center justify-between text-[9.5px] text-slate-400 pt-1 border-t border-[#1b2332]">
+              <span>🔗 {neighborMap.get(hoveredNode.id)?.size || 0} connections</span>
+              <span className="text-cyan-400 font-sans font-medium">Click to inspect code →</span>
+            </div>
+          </div>
+        )}
 
         {/* Floating Legend */}
         <div className="absolute bottom-4 left-4 p-3 rounded-xl bg-[#0b0e14]/90 border border-[#1e2638] backdrop-blur-md shadow-2xl flex flex-col gap-1.5 pointer-events-none">

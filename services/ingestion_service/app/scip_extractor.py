@@ -294,15 +294,18 @@ class SCIPExtractor:
             "line_end": len(lines)
         })
 
-        # Route matching patterns (Express / Next.js / Fastify)
+        # Route matching patterns (Express / Fastify / App router)
+        # Matches router.post("/login", loginAdmin), app.get("/health", (req, res) => ...), etc.
         route_pattern = re.compile(
-            r'(?:app|router)\.(get|post|put|delete|patch)\s*\(\s*[\'"`]([^\'"`]+)[\'"`]\s*,\s*(?:async\s*)?(?:function\s*([a-zA-Z0-9_]+)?|\(([^\)]*)\)\s*=>)',
-            re.MULTILINE
+            r'(?:app|router)\.(get|post|put|delete|patch|all)\s*\(\s*[\'"`]([^\'"`]+)[\'"`]\s*,\s*(.*?)(?=\);|\n\s*(?:app|router)\.|\n\s*module|\n\s*export|\n\s*$|\Z)',
+            re.DOTALL
         )
         for m in route_pattern.finditer(content):
             verb = m.group(1).upper()
             route_path = m.group(2)
-            handler = m.group(3) or "handler"
+            handlers_raw = m.group(3).strip()
+            ids = [w for w in re.findall(r'[a-zA-Z0-9_$]+', handlers_raw) if w not in ['async', 'req', 'res', 'next']]
+            handler = ids[-1] if ids else "handler"
             line_no = content[:m.start()].count('\n') + 1
             endpoint_id = f"endpoint:{verb} {route_path}"
             nodes.append({
@@ -316,7 +319,7 @@ class SCIPExtractor:
                 "path": route_path,
                 "handler": handler,
                 "signature": f"{verb} {route_path} -> {handler}",
-                "language": "typescript",
+                "language": "typescript" if rel_path.endswith(('.ts', '.tsx')) else "javascript",
                 "code_snippet": "\n".join(lines[line_no - 1:min(len(lines), line_no + 15)])
             })
             edges.append({
@@ -340,7 +343,7 @@ class SCIPExtractor:
                 "symbol_kind": "endpoint",
                 "file_path": rel_path,
                 "line_range": f"L{line_no}",
-                "language": "typescript",
+                "language": "typescript" if rel_path.endswith(('.ts', '.tsx')) else "javascript",
                 "text": chunk_text
             })
 
@@ -366,7 +369,7 @@ class SCIPExtractor:
                 "path": route_path,
                 "handler": verb,
                 "signature": f"export async function {verb}({m.group(2)})",
-                "language": "typescript",
+                "language": "typescript" if rel_path.endswith(('.ts', '.tsx')) else "javascript",
                 "code_snippet": "\n".join(lines[line_no - 1:min(len(lines), line_no + 20)])
             })
             edges.append({
@@ -389,19 +392,26 @@ class SCIPExtractor:
                 "symbol_kind": "endpoint",
                 "file_path": rel_path,
                 "line_range": f"L{line_no}",
-                "language": "typescript",
+                "language": "typescript" if rel_path.endswith(('.ts', '.tsx')) else "javascript",
                 "text": chunk_text
             })
 
-        # Function declarations and exports
+        # Function declarations and arrow functions
         func_pattern = re.compile(
             r'(?:export\s+)?(?:async\s+)?function\s+([a-zA-Z0-9_$]+)\s*\(([^)]*)\)(?:\s*:\s*([^{]+))?',
             re.MULTILINE
         )
+        arrow_pattern = re.compile(
+            r'(?:export\s+)?(?:const|let|var)\s+([a-zA-Z0-9_$]+)\s*=\s*(?:async\s*)?(?:\(([^)]*)\)|([a-zA-Z0-9_$]+))\s*=>',
+            re.MULTILINE
+        )
+
+        found_funcs = set()
         for m in func_pattern.finditer(content):
             name = m.group(1)
             if name in ['GET', 'POST', 'PUT', 'DELETE', 'PATCH']:
                 continue
+            found_funcs.add(name)
             line_no = content[:m.start()].count('\n') + 1
             ret_type = f": {m.group(3).strip()}" if m.group(3) else ""
             sig = f"function {name}({m.group(2)}){ret_type}"
@@ -414,7 +424,7 @@ class SCIPExtractor:
                 "line_start": line_no,
                 "line_end": line_no + 20,
                 "signature": sig,
-                "language": "typescript",
+                "language": "typescript" if rel_path.endswith(('.ts', '.tsx')) else "javascript",
                 "code_snippet": "\n".join(lines[line_no - 1:min(len(lines), line_no + 20)])
             })
             edges.append({
@@ -437,11 +447,55 @@ class SCIPExtractor:
                 "symbol_kind": "function",
                 "file_path": rel_path,
                 "line_range": f"L{line_no}",
-                "language": "typescript",
+                "language": "typescript" if rel_path.endswith(('.ts', '.tsx')) else "javascript",
                 "text": chunk_text
             })
 
-        # Classes and Interfaces
+        for m in arrow_pattern.finditer(content):
+            name = m.group(1)
+            if name in found_funcs or name in ['GET', 'POST', 'PUT', 'DELETE', 'PATCH']:
+                continue
+            found_funcs.add(name)
+            line_no = content[:m.start()].count('\n') + 1
+            params = m.group(2) or m.group(3) or ""
+            sig = f"const {name} = ({params}) => ..."
+            func_id = f"func:{rel_path}:{name}"
+            nodes.append({
+                "id": func_id,
+                "label": f"{name}()",
+                "kind": "function",
+                "file_path": rel_path,
+                "line_start": line_no,
+                "line_end": line_no + 20,
+                "signature": sig,
+                "language": "typescript" if rel_path.endswith(('.ts', '.tsx')) else "javascript",
+                "code_snippet": "\n".join(lines[line_no - 1:min(len(lines), line_no + 20)])
+            })
+            edges.append({
+                "source": file_node_id,
+                "target": func_id,
+                "relationship": "CONTAINS"
+            })
+            chunk_text = (
+                f"[Code Symbol: function] {sig}\n"
+                f"File: {rel_path} (Line {line_no})\n"
+                f"Snippet:\n" + "\n".join(lines[line_no - 1:min(len(lines), line_no + 25)])
+            )
+            chunks.append({
+                "source": rel_path,
+                "api_title": f"Function: {name}",
+                "endpoint": sig,
+                "hash": compute_hash(chunk_text),
+                "chunk_type": "code_symbol",
+                "symbol_name": name,
+                "symbol_kind": "function",
+                "file_path": rel_path,
+                "line_range": f"L{line_no}",
+                "language": "typescript" if rel_path.endswith(('.ts', '.tsx')) else "javascript",
+                "text": chunk_text
+            })
+
+        # Classes and Interfaces (with ChromaDB chunks)
         class_pattern = re.compile(
             r'(?:export\s+)?(?:class|interface|type)\s+([a-zA-Z0-9_$]+)',
             re.MULTILINE
@@ -450,21 +504,61 @@ class SCIPExtractor:
             name = m.group(1)
             line_no = content[:m.start()].count('\n') + 1
             class_id = f"class:{rel_path}:{name}"
+            class_snippet = "\n".join(lines[line_no - 1:min(len(lines), line_no + 30)])
             nodes.append({
                 "id": class_id,
                 "label": name,
                 "kind": "class",
                 "file_path": rel_path,
                 "line_start": line_no,
-                "line_end": line_no + 20,
-                "signature": name,
-                "language": "typescript",
-                "code_snippet": "\n".join(lines[line_no - 1:min(len(lines), line_no + 20)])
+                "line_end": line_no + 30,
+                "signature": f"class {name}",
+                "language": "typescript" if rel_path.endswith(('.ts', '.tsx')) else "javascript",
+                "code_snippet": class_snippet
             })
             edges.append({
                 "source": file_node_id,
                 "target": class_id,
                 "relationship": "CONTAINS"
+            })
+            chunk_text = (
+                f"[Code Symbol: Class] class {name}\n"
+                f"File: {rel_path} (Line {line_no})\n"
+                f"Snippet:\n{class_snippet}"
+            )
+            chunks.append({
+                "source": rel_path,
+                "api_title": f"Class: {name}",
+                "endpoint": f"class {name}",
+                "hash": compute_hash(chunk_text),
+                "chunk_type": "code_symbol",
+                "symbol_name": name,
+                "symbol_kind": "class",
+                "file_path": rel_path,
+                "line_range": f"L{line_no}",
+                "language": "typescript" if rel_path.endswith(('.ts', '.tsx')) else "javascript",
+                "text": chunk_text
+            })
+
+        # High-signal file fallback if no specific symbols matched (e.g. templates, scripts, configs)
+        if not chunks and content.strip():
+            file_chunk_text = (
+                f"[Code File: {os.path.basename(rel_path)}]\n"
+                f"Path: {rel_path}\n"
+                f"Content:\n{content[:1500]}"
+            )
+            chunks.append({
+                "source": rel_path,
+                "api_title": f"File: {os.path.basename(rel_path)}",
+                "endpoint": os.path.basename(rel_path),
+                "hash": compute_hash(file_chunk_text),
+                "chunk_type": "code_file",
+                "symbol_name": os.path.basename(rel_path),
+                "symbol_kind": "file",
+                "file_path": rel_path,
+                "line_range": f"L1-L{min(len(lines), 50)}",
+                "language": "typescript" if rel_path.endswith(('.ts', '.tsx')) else "javascript",
+                "text": file_chunk_text
             })
 
         return chunks, nodes, edges

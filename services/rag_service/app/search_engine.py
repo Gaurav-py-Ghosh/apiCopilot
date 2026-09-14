@@ -96,9 +96,22 @@ class SearchEngine:
             print(f"Could not connect to Ingestion Service at {INGESTION_SERVICE_URL}: {e}")
         return 0
 
-    def ingest_chunks(self, chunks: List[Dict[str, Any]]) -> int:
+    def ingest_chunks(self, chunks: List[Dict[str, Any]], clear_existing: bool = False) -> int:
         """Ingests structured chunks into ChromaDB with dense embeddings and rebuilds BM25 index."""
-        if not chunks or not self.collection:
+        if not self.collection:
+            return 0
+
+        if clear_existing and self.collection:
+            try:
+                self.chroma_client.delete_collection(self.collection_name)
+                self.collection = self.chroma_client.create_collection(self.collection_name)
+                self.bm25 = None
+                self.corpus = []
+                self.tokenized_corpus = []
+            except Exception as e:
+                print(f"Error resetting collection in ingest_chunks: {e}")
+
+        if not chunks:
             return 0
 
         texts = [c["text"] for c in chunks]

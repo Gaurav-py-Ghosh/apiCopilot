@@ -3,11 +3,31 @@
 import React, { useState } from 'react';
 import { KnowledgeGraphData } from './CodeKnowledgeGraph';
 
+interface IndexResult {
+  status: string;
+  project: string;
+  files_scanned: number;
+  endpoints_count: number;
+  functions_count: number;
+  classes_count: number;
+  total_chunks: number;
+  graph_nodes_count: number;
+  graph_edges_count: number;
+  duration_ms: number;
+  graph?: KnowledgeGraphData;
+  stats?: Record<string, number>;
+}
+
 interface Props {
   isOpen: boolean;
   onClose: () => void;
   projectName: string;
   apiBase: string;
+  workspacePath?: string;
+  isGitHubWorkspace?: boolean;
+  githubRepoInfo?: any;
+  githubToken?: string;
+  currentGitHubBranch?: string;
   onIndexingComplete?: (data: KnowledgeGraphData) => void;
   onOpenGraph?: () => void;
   onTestQuery?: (query: string) => void;
@@ -18,13 +38,18 @@ export default function SourcegraphIndexDrawer({
   onClose,
   projectName,
   apiBase,
+  workspacePath,
+  isGitHubWorkspace,
+  githubRepoInfo,
+  githubToken,
+  currentGitHubBranch,
   onIndexingComplete,
   onOpenGraph,
   onTestQuery
 }: Props) {
   const [stage, setStage] = useState<'idle' | 'scanning' | 'extracting' | 'embedding' | 'complete' | 'error'>('idle');
   const [progressLog, setProgressLog] = useState<string[]>([]);
-  const [indexResult, setIndexResult] = useState<any>(null);
+  const [indexResult, setIndexResult] = useState<IndexResult | null>(null);
   const [testQueryText, setTestQueryText] = useState('');
   const [testResults, setTestResults] = useState<any[] | null>(null);
   const [searching, setSearching] = useState(false);
@@ -49,9 +74,19 @@ export default function SourcegraphIndexDrawer({
         setProgressLog(prev => [...prev, '[Phase 3] High-signal semantic chunking & ChromaDB dense embedding + Okapi BM25 rebuild...']);
       }, 1500);
 
+      const bodyPayload = {
+        workspace_path: workspacePath || null,
+        is_github: isGitHubWorkspace || false,
+        github_owner: githubRepoInfo?.owner || null,
+        github_repo: githubRepoInfo?.repo || null,
+        github_branch: currentGitHubBranch || 'main',
+        github_token: githubToken || null
+      };
+
       const res = await fetch(`${apiBase}/api/workspace/index-codebase`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(bodyPayload)
       });
 
       if (!res.ok) {

@@ -31,6 +31,7 @@ class SearchRequest(BaseModel):
 
 class IngestRequest(BaseModel):
     chunks: List[Dict[str, Any]]
+    clear_existing: Optional[bool] = False
 
 @app.get("/health")
 def health():
@@ -53,7 +54,7 @@ def search(req: SearchRequest):
 @app.post("/api/ingest")
 def ingest(req: IngestRequest):
     """Ingests newly parsed chunks from Ingestion Service into ChromaDB and BM25 index."""
-    count = engine.ingest_chunks(req.chunks)
+    count = engine.ingest_chunks(req.chunks, clear_existing=req.clear_existing or False)
     return {
         "status": "success",
         "ingested_count": count,

@@ -15,6 +15,38 @@ OMNIKEY_MODEL = os.getenv(
     "OMNIKEY_MODEL",
     "gemini-2.5-flash"
 )
+OLLAMA_URL = os.getenv(
+    "OLLAMA_URL",
+    "http://localhost:11434"
+)
+
+def extract_suggestions(raw_text: str, attached: set, file_symbol_map: dict) -> List[Dict[str, Any]]:
+    """Extracts and validates suggested files against the strict 95/2 rule."""
+    if not raw_text:
+        return []
+    raw_text = raw_text.strip()
+    if raw_text.startswith("```json"):
+        raw_text = raw_text[7:]
+    elif raw_text.startswith("```"):
+        raw_text = raw_text[3:]
+    if raw_text.endswith("```"):
+        raw_text = raw_text[:-3]
+    raw_text = raw_text.strip()
+    
+    try:
+        parsed = json.loads(raw_text)
+        suggestions = parsed.get("suggested_files", []) if isinstance(parsed, dict) else []
+        filtered = []
+        for s in suggestions:
+            if isinstance(s, dict):
+                p = s.get("path", "")
+                if p and p not in attached and p in file_symbol_map:
+                    filtered.append(s)
+                    if len(filtered) >= 2:
+                        break
+        return filtered
+    except Exception:
+        return []
 
 async def suggest_context_files(
     user_prompt: str,
@@ -25,9 +57,9 @@ async def suggest_context_files(
     """
     Evaluates the developer's prompt against the Knowledge Graph symbol index
     and returns AT MOST 1 TO 2 files containing 95% of the core mutation context.
-    Enforces the '95/2 Rule' to avoid context bloat and ensure surgical editing success.
+    Enforces the '95/2 Rule' with cloud OmniKey and automatic local Ollama fallback.
     """
-    if not user_prompt or len(user_prompt.strip().split()) < 2:
+    if not user_prompt or len(user_prompt.strip()) < 3:
         return []
 
     attached = set(attached_files or [])
@@ -98,6 +130,7 @@ Codebase File & Symbol Manifest:
 {file_manifest_text}
 """
 
+    # Primary Attempt: Cloud OmniKey Proxy (Gemini 2.5 Flash)
     url = f"{OMNIKEY_BASE_URL}/models/{OMNIKEY_MODEL}:generateContent?key={OMNIKEY_API_KEY}"
     payload = {
         "contents": [
@@ -113,7 +146,7 @@ Codebase File & Symbol Manifest:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=16.0) as client:
             resp = await client.post(url, json=payload, headers={"Content-Type": "application/json"})
             if resp.status_code == 200:
                 data = resp.json()
@@ -121,28 +154,35 @@ Codebase File & Symbol Manifest:
                 if candidates:
                     parts = candidates[0].get("content", {}).get("parts", [])
                     if parts:
-                        raw_text = parts[0].get("text", "").strip()
-                        if raw_text.startswith("```json"):
-                            raw_text = raw_text[7:]
-                        elif raw_text.startswith("```"):
-                            raw_text = raw_text[3:]
-                        if raw_text.endswith("```"):
-                            raw_text = raw_text[:-3]
-                        raw_text = raw_text.strip()
-                        
-                        parsed = json.loads(raw_text)
-                        suggestions = parsed.get("suggested_files", [])
-                        
-                        # Filter out already attached files & enforce strict max 2
-                        filtered = []
-                        for s in suggestions:
-                            p = s.get("path", "")
-                            if p and p not in attached and p in file_symbol_map:
-                                filtered.append(s)
-                                if len(filtered) >= 2:
-                                    break
-                        return filtered
+                        raw_text = parts[0].get("text", "")
+                        results = extract_suggestions(raw_text, attached, file_symbol_map)
+                        if results:
+                            return results
     except Exception as e:
-        print(f"OmniKey context recommender warning: {e}")
+        err_type = type(e).__name__
+        err_detail = str(e) or "request timeout"
+        print(f"OmniKey context recommender notice: {err_type} ({err_detail}). Engaging local fallback...")
+
+    # Secondary Fallback: Local Ollama (gemma3:4b)
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            ollama_payload = {
+                "model": "gemma3:4b",
+                "messages": [
+                    {"role": "system", "content": system_instruction},
+                    {"role": "user", "content": user_message}
+                ],
+                "format": "json",
+                "stream": False
+            }
+            resp = await client.post(f"{OLLAMA_URL}/api/chat", json=ollama_payload)
+            if resp.status_code == 200:
+                d = resp.json()
+                content = d.get("message", {}).get("content", "")
+                results = extract_suggestions(content, attached, file_symbol_map)
+                if results:
+                    return results
+    except Exception as e:
+        print(f"Local Ollama context recommender fallback error: {e}")
 
     return []
