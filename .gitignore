@@ -167,3 +167,9 @@ dist/
 
 
 lab4.txt
+
+# Presentation generation & temporary artifacts
+PROJECT_7_SLIDES_SPECIFICATION.md
+scripts/generate_presentation.js
+slides_export/
+.playwright-mcp/

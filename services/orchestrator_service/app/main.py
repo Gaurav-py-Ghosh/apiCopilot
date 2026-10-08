@@ -28,6 +28,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from .arcgen_router import router as arcgen_router
+app.include_router(arcgen_router, prefix="/api/arcgen", tags=["arcgen"])
+
 WORKSPACE_ROOT = Path(os.getenv("WORKSPACE_ROOT", "/workspace" if os.path.exists("/workspace") else str(Path(__file__).resolve().parent.parent.parent.parent)))
 
 IGNORED_DIRS = {

@@ -8,6 +8,7 @@ import SourcegraphIndexDrawer from './components/SourcegraphIndexDrawer';
 import ContextFileChips, { ContextFileItem, SuggestedFileItem } from './components/ContextFileChips';
 import GitHubOpenModal, { GitHubRepoInfo } from './components/GitHubOpenModal';
 import AutoForkPromptModal from './components/AutoForkPromptModal';
+import { ArcGenStudio } from './components/ArcGenStudio';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
@@ -34,6 +35,13 @@ const Icons = {
   ArchonAI: () => (
     <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
+    </svg>
+  ),
+  Architecture: () => (
+    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <polygon points="12 2 2 7 12 12 22 7 12 2" />
+      <polyline points="2 17 12 22 22 17" />
+      <polyline points="2 12 12 17 22 12" />
     </svg>
   ),
   Diagnostics: () => (
@@ -3576,7 +3584,7 @@ function VSCodeAgentIDE({
 
 /* -- Main Application Component ------------------------------ */
 export default function Home() {
-  const [appMode, setAppMode] = useState<'api_copilot' | 'copilot_agent' | 'evaluation'>('api_copilot');
+  const [appMode, setAppMode] = useState<'api_copilot' | 'copilot_agent' | 'evaluation' | 'arcgen'>('api_copilot');
 
   // Shared Global State
   const [models, setModels] = useState<string[]>(["gemma3:4b", "gemma3:12b", "codellama:7b-instruct"]);
@@ -3901,6 +3909,17 @@ export default function Home() {
               <Icons.Chart />
               <span>Lab 4 Evaluation</span>
             </button>
+            <button
+              onClick={() => setAppMode('arcgen')}
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-[12px] font-mono font-semibold transition-all cursor-pointer ${
+                appMode === 'arcgen'
+                  ? 'bg-[#1e293b] text-[#a78bfa] border border-[#8b5cf6]/40 shadow-md'
+                  : 'text-[#64748b] hover:text-[#cbd5e1]'
+              }`}
+            >
+              <Icons.Architecture />
+              <span>ArcGen Studio</span>
+            </button>
           </div>
 
           <div className="flex items-center gap-1.5 px-2.5 py-1 bg-[#10b981]/10 border border-[#10b981]/25 rounded-lg text-[11px] font-mono text-[#10b981]">
@@ -3914,6 +3933,13 @@ export default function Home() {
       {appMode === 'evaluation' ? (
         <main className="w-full min-h-[calc(100vh-56px)]">
           <EvaluationDashboard />
+        </main>
+      ) : appMode === 'arcgen' ? (
+        <main className="w-full min-h-[calc(100vh-56px)] bg-[#090b0e]">
+          <ArcGenStudio
+            apiBase={API_BASE}
+            onOpenInIDE={() => setAppMode('copilot_agent')}
+          />
         </main>
       ) : appMode === 'copilot_agent' ? (
         <main className="w-full h-[calc(100vh-56px)] overflow-hidden">
